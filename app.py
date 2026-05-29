@@ -1,0 +1,722 @@
+import os
+from datetime import date, timedelta
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
+
+
+st.set_page_config(page_title="Investment Dashboard", layout="wide")
+st.title("Investment Intelligence Dashboard")
+
+
+DATA_FILES = {
+    "portfolio": "portfolio.csv",
+    "bank_accounts": "bank_accounts.csv",
+    "properties": "properties.csv",
+    "mortgage": "mortgage.csv",
+    "property_cashflow": "property_cashflow.csv",
+}
+
+BASE_CURRENCY = "THB"
+
+DEFAULT_MARKET_ASSETS = {
+    "SPY": "US Market",
+    "QQQ": "US Tech / AI",
+    "SOXX": "Semiconductor",
+    "XLV": "Healthcare",
+    "ITA": "Aerospace",
+    "XLE": "Energy",
+    "BRK-B": "Berkshire Hathaway",
+    "INDA": "India",
+    "MCHI": "China",
+    "THD": "Thailand ETF",
+    "GLD": "Gold",
+    "BTC-USD": "Bitcoin",
+}
+
+
+def clean_ticker(ticker):
+    if pd.isna(ticker):
+        return ""
+    return str(ticker).strip().upper()
+
+
+def clean_currency(currency):
+    if pd.isna(currency) or str(currency).strip() == "":
+        return BASE_CURRENCY
+    return str(currency).strip().upper()
+
+
+def to_number(series, default=0):
+    return pd.to_numeric(series, errors="coerce").fillna(default)
+
+
+def ensure_columns(df, required_columns):
+    for col, default_value in required_columns.items():
+        if col not in df.columns:
+            df[col] = default_value
+    return df[list(required_columns.keys())]
+
+
+def read_csv_or_template(path, required_columns):
+    if not os.path.exists(path):
+        return pd.DataFrame(required_columns)
+
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(required_columns)
+
+    return ensure_columns(df, required_columns)
+
+
+def save_csv(df, path):
+    df.to_csv(path, index=False)
+    st.success(f"Saved {path}")
+    st.cache_data.clear()
+    st.rerun()
+
+
+def get_asset_name(ticker):
+    ticker = clean_ticker(ticker)
+    return DEFAULT_MARKET_ASSETS.get(ticker, ticker)
+
+
+@st.cache_data(ttl=300)
+def download_prices(tickers, start=None, end=None, period=None):
+    tickers = [clean_ticker(t) for t in tickers if clean_ticker(t)]
+
+    if not tickers:
+        return pd.DataFrame()
+
+    data = yf.download(
+        tickers=tickers,
+        start=start,
+        end=end,
+        period=period,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
+        threads=True,
+    )
+
+    if data.empty:
+        return pd.DataFrame()
+
+    if isinstance(data.columns, pd.MultiIndex):
+        close = data["Close"] if "Close" in data.columns.get_level_values(0) else data.xs("Close", level=1, axis=1)
+    else:
+        close = data["Close"] if "Close" in data.columns else data
+
+    if isinstance(close, pd.Series):
+        close = close.to_frame(name=tickers[0])
+
+    close.columns = [clean_ticker(c) for c in close.columns]
+    return close
+
+
+def get_current_prices(tickers):
+    tickers = [clean_ticker(t) for t in tickers if clean_ticker(t) and clean_ticker(t) != "CASH"]
+
+    if not tickers:
+        return pd.Series(dtype=float)
+
+    prices = download_prices(tickers, period="7d")
+
+    if prices.empty:
+        return pd.Series(dtype=float)
+
+    return prices.ffill().iloc[-1]
+
+
+@st.cache_data(ttl=300)
+def get_usdthb_rate():
+    prices = download_prices(["USDTHB=X"], period="7d")
+
+    if prices.empty or "USDTHB=X" not in prices.columns:
+        return 32.43
+
+    rate = float(prices["USDTHB=X"].ffill().iloc[-1])
+    return rate if rate > 0 else 32.43
+
+
+def fx_to_thb(currency):
+    currency = clean_currency(currency)
+    if currency == "THB":
+        return 1.0
+    if currency == "USD":
+        return get_usdthb_rate()
+    return 1.0
+
+
+def render_editable_table(title, df, key, file_path, column_config=None):
+    st.markdown(f"### {title}")
+
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=key,
+        column_config=column_config,
+    )
+
+    if st.button(f"Save {title}", key=f"save_{key}"):
+        save_csv(edited_df, file_path)
+
+    return edited_df.copy()
+
+
+def load_portfolio():
+    columns = {
+        "Broker": "",
+        "Ticker": "",
+        "Currency": "THB",
+        "Quantity": 0.0,
+        "AvgCost": 0.0,
+        "ManualPrice": 0.0,
+    }
+
+    df = read_csv_or_template(DATA_FILES["portfolio"], columns)
+    df["Broker"] = df["Broker"].astype(str).str.strip()
+    df["Ticker"] = df["Ticker"].apply(clean_ticker)
+    df["Currency"] = df["Currency"].apply(clean_currency)
+    df["Quantity"] = to_number(df["Quantity"])
+    df["AvgCost"] = to_number(df["AvgCost"])
+    df["ManualPrice"] = to_number(df["ManualPrice"])
+    return df
+
+
+def load_banks():
+    columns = {
+        "Bank": "",
+        "Account": "",
+        "Balance": 0.0,
+        "Currency": "THB",
+    }
+
+    df = read_csv_or_template(DATA_FILES["bank_accounts"], columns)
+    df["Currency"] = df["Currency"].apply(clean_currency)
+    df["Balance"] = to_number(df["Balance"])
+    df["FxRateToTHB"] = df["Currency"].apply(fx_to_thb)
+    df["BalanceTHB"] = df["Balance"] * df["FxRateToTHB"]
+    return df
+
+
+def load_properties():
+    columns = {
+        "Property": "",
+        "Type": "",
+        "EstimatedValue": 0.0,
+        "Location": "",
+    }
+
+    df = read_csv_or_template(DATA_FILES["properties"], columns)
+    df["EstimatedValue"] = to_number(df["EstimatedValue"])
+    return df
+
+
+def load_mortgage():
+    columns = {
+        "Property": "",
+        "OutstandingDebt": 0.0,
+        "MonthlyPayment": 0.0,
+        "InterestRate": 0.0,
+    }
+
+    df = read_csv_or_template(DATA_FILES["mortgage"], columns)
+    df["OutstandingDebt"] = to_number(df["OutstandingDebt"])
+    df["MonthlyPayment"] = to_number(df["MonthlyPayment"])
+    df["InterestRate"] = to_number(df["InterestRate"])
+    return df
+
+
+def load_property_cashflow():
+    columns = {
+        "Property": "",
+        "Month": "",
+        "Rent": 0.0,
+        "Expense": 0.0,
+        "ExtraPayment": 0.0,
+    }
+
+    df = read_csv_or_template(DATA_FILES["property_cashflow"], columns)
+    df["Rent"] = to_number(df["Rent"])
+    df["Expense"] = to_number(df["Expense"])
+    df["ExtraPayment"] = to_number(df["ExtraPayment"])
+    return df
+
+
+def calculate_portfolio(portfolio):
+    portfolio = portfolio.copy()
+    portfolio["Ticker"] = portfolio["Ticker"].apply(clean_ticker)
+    portfolio = portfolio[portfolio["Ticker"] != ""]
+
+    portfolio["Currency"] = portfolio["Currency"].apply(clean_currency)
+    portfolio["Quantity"] = to_number(portfolio["Quantity"])
+    portfolio["AvgCost"] = to_number(portfolio["AvgCost"])
+    portfolio["ManualPrice"] = to_number(portfolio["ManualPrice"])
+
+    tickers = portfolio.loc[portfolio["Ticker"] != "CASH", "Ticker"].dropna().unique().tolist()
+    current_prices = get_current_prices(tickers)
+
+    portfolio["YFinancePrice"] = portfolio["Ticker"].map(current_prices)
+    portfolio.loc[portfolio["Ticker"] == "CASH", "YFinancePrice"] = 1
+    portfolio["YFinancePrice"] = to_number(portfolio["YFinancePrice"])
+
+    portfolio["CurrentPrice"] = portfolio["YFinancePrice"]
+
+    use_manual = (portfolio["CurrentPrice"] == 0) & (portfolio["ManualPrice"] > 0)
+    portfolio.loc[use_manual, "CurrentPrice"] = portfolio.loc[use_manual, "ManualPrice"]
+    portfolio.loc[portfolio["Ticker"] == "CASH", "CurrentPrice"] = 1
+
+    portfolio["PriceSource"] = "yfinance"
+    portfolio.loc[use_manual, "PriceSource"] = "manual"
+    portfolio.loc[portfolio["Ticker"] == "CASH", "PriceSource"] = "cash"
+
+    portfolio["FxRateToTHB"] = portfolio["Currency"].apply(fx_to_thb)
+
+    portfolio["CostBasisNative"] = portfolio["Quantity"] * portfolio["AvgCost"]
+    portfolio["MarketValueNative"] = portfolio["Quantity"] * portfolio["CurrentPrice"]
+    portfolio["PnLNative"] = portfolio["MarketValueNative"] - portfolio["CostBasisNative"]
+
+    portfolio["CostBasisTHB"] = portfolio["CostBasisNative"] * portfolio["FxRateToTHB"]
+    portfolio["MarketValueTHB"] = portfolio["MarketValueNative"] * portfolio["FxRateToTHB"]
+    portfolio["PnLTHB"] = portfolio["MarketValueTHB"] - portfolio["CostBasisTHB"]
+
+    portfolio["ReturnPct"] = 0.0
+    mask = portfolio["CostBasisNative"] != 0
+    portfolio.loc[mask, "ReturnPct"] = portfolio.loc[mask, "PnLNative"] / portfolio.loc[mask, "CostBasisNative"] * 100
+
+    return portfolio
+
+
+def render_portfolio_section():
+    st.subheader("Investment Portfolio")
+
+    st.caption(f"Base Currency = THB | USD/THB = {get_usdthb_rate():,.4f}")
+
+    portfolio = load_portfolio()
+    portfolio_calc = calculate_portfolio(portfolio)
+
+    display_columns = [
+        "Broker", "Ticker", "Currency", "Quantity", "AvgCost", "ManualPrice",
+        "CurrentPrice", "PriceSource", "FxRateToTHB",
+        "MarketValueNative", "MarketValueTHB", "PnLTHB", "ReturnPct",
+    ]
+
+    for col in display_columns:
+        if col not in portfolio_calc.columns:
+            portfolio_calc[col] = ""
+
+    st.markdown("### Edit Portfolio")
+    st.caption("หุ้นสหรัฐใช้ Currency = USD, เงินสด/กองทุนไทย/หุ้นไทย/ทองไทยใช้ Currency = THB")
+
+    edited = st.data_editor(
+        portfolio_calc[display_columns],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="portfolio_editor_main",
+        disabled=[
+            "CurrentPrice", "PriceSource", "FxRateToTHB",
+            "MarketValueNative", "MarketValueTHB", "PnLTHB", "ReturnPct",
+        ],
+        column_config={
+            "Broker": st.column_config.TextColumn("Broker"),
+            "Ticker": st.column_config.TextColumn("Ticker"),
+            "Currency": st.column_config.SelectboxColumn("Currency", options=["THB", "USD"], required=True),
+            "Quantity": st.column_config.NumberColumn("Quantity", step=0.000001, format="%.8f"),
+            "AvgCost": st.column_config.NumberColumn("AvgCost", step=0.000001, format="%.6f"),
+            "ManualPrice": st.column_config.NumberColumn(
+                "ManualPrice",
+                help="ใส่ราคาปัจจุบันเองเมื่อ yfinance ดึงไม่ได้ เช่น BRKB80, K-USXNDQ-A(A), MTS-GOLD",
+                step=0.000001,
+                format="%.6f",
+            ),
+            "CurrentPrice": st.column_config.NumberColumn("CurrentPrice", disabled=True, format="%.6f"),
+            "PriceSource": st.column_config.TextColumn("PriceSource", disabled=True),
+            "FxRateToTHB": st.column_config.NumberColumn("FxRateToTHB", disabled=True, format="%.4f"),
+            "MarketValueNative": st.column_config.NumberColumn("MarketValueNative", disabled=True, format="%.2f"),
+            "MarketValueTHB": st.column_config.NumberColumn("MarketValueTHB", disabled=True, format="%.2f"),
+            "PnLTHB": st.column_config.NumberColumn("PnLTHB", disabled=True, format="%.2f"),
+            "ReturnPct": st.column_config.NumberColumn("ReturnPct", disabled=True, format="%.2f"),
+        },
+    )
+
+    save_df = edited[["Broker", "Ticker", "Currency", "Quantity", "AvgCost", "ManualPrice"]].copy()
+    save_df["Broker"] = save_df["Broker"].astype(str).str.strip()
+    save_df["Ticker"] = save_df["Ticker"].apply(clean_ticker)
+    save_df["Currency"] = save_df["Currency"].apply(clean_currency)
+    save_df["Quantity"] = to_number(save_df["Quantity"])
+    save_df["AvgCost"] = to_number(save_df["AvgCost"])
+    save_df["ManualPrice"] = to_number(save_df["ManualPrice"])
+    save_df = save_df[save_df["Ticker"] != ""]
+
+    if st.button("Save Portfolio", key="save_portfolio_main"):
+        save_csv(save_df, DATA_FILES["portfolio"])
+
+    portfolio_calc = calculate_portfolio(save_df)
+
+    missing = portfolio_calc[(portfolio_calc["CurrentPrice"] == 0) & (portfolio_calc["Ticker"] != "CASH")]
+    if not missing.empty:
+        st.warning("ยังไม่มีราคาสำหรับ: " + ", ".join(missing["Ticker"].unique()) + " — ให้ใส่ ManualPrice")
+
+    total_cost = portfolio_calc["CostBasisTHB"].sum()
+    investment_value = portfolio_calc["MarketValueTHB"].sum()
+    total_pnl = investment_value - total_cost
+    total_return_pct = total_pnl / total_cost * 100 if total_cost else 0
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Investment Value (THB)", f"{investment_value:,.2f}")
+    col2.metric("Investment Gain/Loss (THB)", f"{total_pnl:,.2f}")
+    col3.metric("Investment Return %", f"{total_return_pct:.2f}%")
+
+    st.markdown("### Portfolio Summary")
+    summary_cols = [
+        "Broker", "Ticker", "Currency", "Quantity", "AvgCost", "CurrentPrice",
+        "PriceSource", "MarketValueNative", "MarketValueTHB", "PnLTHB", "ReturnPct"
+    ]
+    st.dataframe(portfolio_calc[summary_cols].round(2), use_container_width=True)
+
+    c1, c2 = st.columns(2)
+
+    broker_summary = portfolio_calc.groupby("Broker", dropna=False)["MarketValueTHB"].sum().reset_index()
+    ticker_summary = portfolio_calc.groupby("Ticker", dropna=False)["MarketValueTHB"].sum().reset_index()
+
+    with c1:
+        if broker_summary["MarketValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(broker_summary, names="Broker", values="MarketValueTHB", title="Allocation by Broker (THB)"), use_container_width=True)
+
+    with c2:
+        if ticker_summary["MarketValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(ticker_summary, names="Ticker", values="MarketValueTHB", title="Allocation by Ticker (THB)"), use_container_width=True)
+
+    return investment_value, portfolio_calc
+
+
+def render_bank_section():
+    st.subheader("Bank Accounts")
+
+    banks = load_banks()
+
+    edited = render_editable_table(
+        title="Bank Accounts",
+        df=banks[["Bank", "Account", "Balance", "Currency"]],
+        key="bank_editor",
+        file_path=DATA_FILES["bank_accounts"],
+        column_config={
+            "Balance": st.column_config.NumberColumn("Balance", step=100.0),
+            "Currency": st.column_config.SelectboxColumn("Currency", options=["THB", "USD"], required=True),
+        },
+    )
+
+    edited["Currency"] = edited["Currency"].apply(clean_currency)
+    edited["Balance"] = to_number(edited["Balance"])
+    edited["FxRateToTHB"] = edited["Currency"].apply(fx_to_thb)
+    edited["BalanceTHB"] = edited["Balance"] * edited["FxRateToTHB"]
+
+    bank_cash_value = edited["BalanceTHB"].sum()
+
+    st.metric("Total Bank Cash (THB)", f"{bank_cash_value:,.2f}")
+    st.dataframe(edited.round(2), use_container_width=True)
+
+    if edited["BalanceTHB"].sum() != 0:
+        st.plotly_chart(px.pie(edited, names="Bank", values="BalanceTHB", title="Bank Cash Allocation (THB)"), use_container_width=True)
+
+    return bank_cash_value, edited
+
+
+def load_and_render_real_estate():
+    st.subheader("Real Estate")
+
+    properties = load_properties()
+    mortgage = load_mortgage()
+    cashflow = load_property_cashflow()
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        edited_properties = render_editable_table(
+            "Properties",
+            properties,
+            "properties_editor",
+            DATA_FILES["properties"],
+            {"EstimatedValue": st.column_config.NumberColumn("EstimatedValue", step=10000.0)},
+        )
+
+    with c2:
+        edited_mortgage = render_editable_table(
+            "Mortgage",
+            mortgage,
+            "mortgage_editor",
+            DATA_FILES["mortgage"],
+            {
+                "OutstandingDebt": st.column_config.NumberColumn("OutstandingDebt", step=10000.0),
+                "MonthlyPayment": st.column_config.NumberColumn("MonthlyPayment", step=1000.0),
+                "InterestRate": st.column_config.NumberColumn("InterestRate", step=0.01),
+            },
+        )
+
+    edited_cashflow = render_editable_table(
+        "Property Cash Flow",
+        cashflow,
+        "cashflow_editor",
+        DATA_FILES["property_cashflow"],
+        {
+            "Rent": st.column_config.NumberColumn("Rent", step=1000.0),
+            "Expense": st.column_config.NumberColumn("Expense", step=1000.0),
+            "ExtraPayment": st.column_config.NumberColumn("ExtraPayment", step=1000.0),
+        },
+    )
+
+    edited_properties["EstimatedValue"] = to_number(edited_properties["EstimatedValue"])
+    edited_mortgage["OutstandingDebt"] = to_number(edited_mortgage["OutstandingDebt"])
+
+    real_estate = edited_properties.merge(
+        edited_mortgage[["Property", "OutstandingDebt", "MonthlyPayment", "InterestRate"]],
+        on="Property",
+        how="left",
+    )
+
+    real_estate["OutstandingDebt"] = to_number(real_estate["OutstandingDebt"])
+    real_estate["Equity"] = real_estate["EstimatedValue"] - real_estate["OutstandingDebt"]
+
+    property_value = real_estate["EstimatedValue"].sum()
+    property_debt = real_estate["OutstandingDebt"].sum()
+    property_equity = real_estate["Equity"].sum()
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Property Value (THB)", f"{property_value:,.2f}")
+    m2.metric("Property Debt (THB)", f"{property_debt:,.2f}")
+    m3.metric("Property Equity (THB)", f"{property_equity:,.2f}")
+
+    st.dataframe(real_estate.round(2), use_container_width=True)
+
+    if property_equity != 0:
+        st.plotly_chart(px.pie(real_estate, names="Property", values="Equity", title="Real Estate Equity Allocation (THB)"), use_container_width=True)
+
+    edited_cashflow["Rent"] = to_number(edited_cashflow["Rent"])
+    edited_cashflow["Expense"] = to_number(edited_cashflow["Expense"])
+    edited_cashflow["ExtraPayment"] = to_number(edited_cashflow["ExtraPayment"])
+    edited_cashflow["NetCashFlow"] = edited_cashflow["Rent"] - edited_cashflow["Expense"] - edited_cashflow["ExtraPayment"]
+
+    st.markdown("### Property Monthly Cash Flow")
+    st.dataframe(edited_cashflow.round(2), use_container_width=True)
+
+    if not edited_cashflow.empty:
+        cashflow_summary = edited_cashflow.groupby("Property", dropna=False)["NetCashFlow"].sum().reset_index()
+        st.plotly_chart(px.bar(cashflow_summary, x="Property", y="NetCashFlow", title="Net Cash Flow by Property"), use_container_width=True)
+
+    return property_value, property_debt, property_equity, real_estate, edited_cashflow
+
+
+def render_net_worth_summary(investment_value, bank_cash_value, property_value, property_debt, property_equity):
+    st.header("Net Worth Summary")
+
+    net_worth = investment_value + bank_cash_value + property_equity
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Investment Portfolio (THB)", f"{investment_value:,.2f}")
+    c2.metric("Bank Cash (THB)", f"{bank_cash_value:,.2f}")
+    c3.metric("Real Estate Equity (THB)", f"{property_equity:,.2f}")
+    c4.metric("Net Worth (THB)", f"{net_worth:,.2f}")
+
+    networth_df = pd.DataFrame({
+        "Category": ["Investment Portfolio", "Bank Cash", "Real Estate Equity"],
+        "ValueTHB": [investment_value, bank_cash_value, property_equity],
+    })
+
+    st.dataframe(networth_df.round(2), use_container_width=True)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if networth_df["ValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(networth_df, names="Category", values="ValueTHB", title="Net Worth Allocation (THB)"), use_container_width=True)
+
+    debt_df = pd.DataFrame({
+        "Category": ["Investment Portfolio", "Bank Cash", "Real Estate Gross Value", "Real Estate Debt", "Net Worth"],
+        "ValueTHB": [investment_value, bank_cash_value, property_value, -property_debt, net_worth],
+    })
+
+    with c2:
+        st.plotly_chart(px.bar(debt_df, x="Category", y="ValueTHB", title="Assets, Debt, and Net Worth (THB)"), use_container_width=True)
+
+
+def get_portfolio_tickers_for_market():
+    portfolio = load_portfolio()
+    tickers = portfolio["Ticker"].apply(clean_ticker).replace("", pd.NA).dropna().unique().tolist()
+    manual_only = {"CASH", "BRKB80", "K-USXNDQ-A(A)", "MTS-GOLD"}
+    return [t for t in tickers if t not in manual_only]
+
+
+def render_market_analysis():
+    st.header("Market Analysis")
+
+    portfolio_tickers = get_portfolio_tickers_for_market()
+    default_tickers = list(dict.fromkeys(list(DEFAULT_MARKET_ASSETS.keys()) + portfolio_tickers))
+
+    with st.sidebar:
+        st.subheader("Market Settings")
+
+        ticker_input = st.text_area(
+            "Tickers ที่ต้องการติดตาม",
+            value=",".join(default_tickers),
+            help="คั่นด้วย comma เช่น AAPL,MSFT,NVDA,MMYT,BTC-USD",
+        )
+
+        today = date.today()
+        default_start = today - timedelta(days=365 * 5)
+
+        start_date = st.date_input("วันที่เริ่มต้น", value=default_start)
+        end_date = st.date_input("วันที่สิ้นสุด", value=today)
+
+        momentum_choice = st.selectbox("เลือกช่วง Momentum", ["1M", "3M", "6M", "1Y"], index=1)
+
+    selected_assets = [clean_ticker(t) for t in ticker_input.split(",") if clean_ticker(t)]
+    selected_assets = list(dict.fromkeys(selected_assets))
+
+    if start_date >= end_date:
+        st.warning("วันที่เริ่มต้นต้องมาก่อนวันที่สิ้นสุด")
+        return
+
+    if not selected_assets:
+        st.warning("กรุณาเลือกสินทรัพย์อย่างน้อย 1 ตัว")
+        return
+
+    data = download_prices(selected_assets, start=start_date, end=end_date)
+
+    if data.empty:
+        st.warning("ไม่พบข้อมูลราคาจาก yfinance สำหรับ ticker ที่เลือก")
+        return
+
+    data = data.ffill().bfill().dropna(axis=1, how="all")
+
+    if data.empty:
+        st.warning("ข้อมูลราคาว่างหลังจากล้างข้อมูล")
+        return
+
+    missing = sorted(set(selected_assets) - set(data.columns))
+    if missing:
+        st.info("Ticker ที่ดึงราคาไม่ได้: " + ", ".join(missing))
+
+    returns = data.pct_change().dropna()
+    normalized = data.div(data.iloc[0]).mul(100)
+
+    st.subheader(f"Performance Comparison: {start_date} to {end_date}")
+
+    fig = go.Figure()
+    for ticker in normalized.columns:
+        fig.add_trace(go.Scatter(x=normalized.index, y=normalized[ticker], mode="lines", name=f"{ticker} - {get_asset_name(ticker)}"))
+
+    fig.update_layout(template="plotly_dark", height=650, hovermode="x unified", yaxis=dict(type="log", title="Normalized Performance (Log Scale)"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    momentum_days = {"1M": 21, "3M": 63, "6M": 126, "1Y": 252}[momentum_choice]
+
+    st.subheader(f"Momentum Ranking - {momentum_choice}")
+
+    if len(data) > momentum_days:
+        momentum = (data.iloc[-1] / data.iloc[-momentum_days] - 1) * 100
+        momentum = momentum.sort_values(ascending=False)
+        momentum_df = pd.DataFrame({
+            "Ticker": momentum.index,
+            "Asset": [get_asset_name(t) for t in momentum.index],
+            f"Momentum {momentum_choice} %": momentum.values,
+        })
+        st.dataframe(momentum_df.round(2), use_container_width=True)
+    else:
+        st.info("ข้อมูลยังไม่พอสำหรับคำนวณ Momentum ช่วงนี้")
+
+    st.subheader("Correlation Heatmap")
+
+    if len(data.columns) >= 2 and not returns.empty:
+        heatmap = px.imshow(returns.corr(), text_auto=".2f", color_continuous_scale="RdBu_r")
+        heatmap.update_layout(template="plotly_dark", height=650)
+        st.plotly_chart(heatmap, use_container_width=True)
+    else:
+        st.info("ต้องเลือกอย่างน้อย 2 สินทรัพย์เพื่อดู Correlation")
+
+    st.subheader("Risk Analysis")
+
+    if len(data) < 2 or returns.empty:
+        st.info("ข้อมูลยังไม่พอสำหรับคำนวณ Risk Analysis")
+        return
+
+    total_return = (data.iloc[-1] / data.iloc[0] - 1) * 100
+    years_count = max(len(data) / 252, 1 / 252)
+    annual_return = ((data.iloc[-1] / data.iloc[0]) ** (1 / years_count) - 1) * 100
+    annual_volatility = returns.std() * (252 ** 0.5) * 100
+
+    drawdown = (data / data.cummax() - 1) * 100
+    max_drawdown = drawdown.min()
+
+    risk_df = pd.DataFrame({
+        "Ticker": data.columns,
+        "Asset": [get_asset_name(t) for t in data.columns],
+        "Total Return %": total_return.values,
+        "Annual Return %": annual_return.values,
+        "Annual Volatility %": annual_volatility.values,
+        "Max Drawdown %": max_drawdown.values,
+    })
+
+    risk_df["Sharpe Ratio"] = risk_df.apply(
+        lambda row: row["Annual Return %"] / row["Annual Volatility %"] if row["Annual Volatility %"] != 0 else 0,
+        axis=1,
+    )
+
+    risk_df = risk_df.sort_values("Annual Return %", ascending=False)
+    st.dataframe(risk_df.round(2), use_container_width=True)
+
+    st.subheader("Risk vs Return")
+
+    risk_return_fig = px.scatter(
+        risk_df,
+        x="Annual Volatility %",
+        y="Annual Return %",
+        text="Ticker",
+        hover_name="Asset",
+        size=risk_df["Total Return %"].abs() + 10,
+        title="Risk vs Return Matrix",
+    )
+
+    risk_return_fig.update_traces(textposition="top center")
+    risk_return_fig.update_layout(template="plotly_dark", height=650)
+    st.plotly_chart(risk_return_fig, use_container_width=True)
+
+    st.subheader("Drawdown Chart")
+
+    drawdown_fig = go.Figure()
+    for ticker in drawdown.columns:
+        drawdown_fig.add_trace(go.Scatter(x=drawdown.index, y=drawdown[ticker], mode="lines", name=f"{ticker} - {get_asset_name(ticker)}"))
+
+    drawdown_fig.update_layout(template="plotly_dark", height=650, hovermode="x unified", yaxis_title="Drawdown %")
+    st.plotly_chart(drawdown_fig, use_container_width=True)
+
+
+tab_wealth, tab_market = st.tabs(["My Wealth", "Market Analysis"])
+
+with tab_wealth:
+    st.header("My Wealth")
+
+    investment_value, portfolio_calc = render_portfolio_section()
+    st.divider()
+
+    bank_cash_value, banks = render_bank_section()
+    st.divider()
+
+    property_value, property_debt, property_equity, real_estate, property_cashflow = load_and_render_real_estate()
+    st.divider()
+
+    render_net_worth_summary(
+        investment_value=investment_value,
+        bank_cash_value=bank_cash_value,
+        property_value=property_value,
+        property_debt=property_debt,
+        property_equity=property_equity,
+    )
+
+with tab_market:
+    render_market_analysis()
