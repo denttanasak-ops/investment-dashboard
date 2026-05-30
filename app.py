@@ -51,6 +51,14 @@ def load_google_sheet(sheet_name: str) -> pd.DataFrame:
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+
+    # ตัดคอลัมน์ว่างที่ Google Sheet ส่งมา เช่น Unnamed: 4, Unnamed: 5
+    drop_cols = [c for c in df.columns if str(c).lower().startswith("unnamed")]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
+    # ตัดแถวว่างทั้งหมด
+    df = df.dropna(how="all")
     return df
 
 
@@ -176,7 +184,7 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
         "Asset Class": ["Asset Class", "AssetClass", "Class", "Type", "Category"],
         "Qty": ["Qty", "Quantity", "Shares", "Units", "Amount"],
         "Avg Cost": ["Avg Cost", "Average Cost", "AvgCost", "Cost", "Buy Price", "Average Price"],
-        "Manual Price": ["Manual Price", "Current Price", "Price", "Market Price", "Last Price"],
+        "Manual Price": ["Manual Price", "Current Price", "CurrentPrice", "Price", "Market Price", "MarketPrice", "Last Price", "LastPrice"],
         "Currency": ["Currency", "CCY"],
         "FX": ["FX", "Exchange Rate", "Fx Rate", "THB Rate"],
     }
@@ -201,11 +209,21 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
     df["Manual Price"] = to_number(df["Manual Price"])
     df["FX"] = to_number(df["FX"]).replace(0, 1)
 
+    # ถ้ามีคอลัมน์มูลค่ารวมในชีต ให้ใช้ค่าจากชีตเป็นหลัก
+    # เพื่อกันกรณี BRKB80 / กองทุนไทย / ทอง ที่ yfinance อาจตีราคาเป็นหุ้นสหรัฐผิดตัว
+    market_value_col = pick_col(df, ["Market Value", "MarketValue", "Current Value", "CurrentValue", "Value", "THB Value", "THBValue"])
+    cost_value_col = pick_col(df, ["Cost Value", "CostValue", "Total Cost", "TotalCost", "Invested", "Investment"])
+
     prices = []
     for _, row in df.iterrows():
         manual_price = row["Manual Price"]
+        symbol_text = str(row["Symbol"]).strip().upper()
+        asset_class_text = str(row["Asset Class"]).strip().lower()
+
         if manual_price > 0:
             prices.append(manual_price)
+        elif symbol_text.endswith("80") or "FUND" in asset_class_text or "GOLD" in asset_class_text or "กองทุน" in asset_class_text:
+            prices.append(0)
         else:
             yf_symbol = normalize_symbol_for_yfinance(row["Symbol"])
             prices.append(get_price_yfinance(yf_symbol))
@@ -213,6 +231,13 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
     df["Current Price"] = pd.Series(prices).fillna(0)
     df["Cost Value"] = df["Qty"] * df["Avg Cost"] * df["FX"]
     df["Market Value"] = df["Qty"] * df["Current Price"] * df["FX"]
+
+    if cost_value_col is not None:
+        df["Cost Value"] = to_number(df[cost_value_col])
+    if market_value_col is not None:
+        df["Market Value"] = to_number(df[market_value_col])
+        df["Current Price"] = np.where(df["Qty"] > 0, df["Market Value"] / df["Qty"] / df["FX"], df["Current Price"])
+
     df["Gain/Loss"] = df["Market Value"] - df["Cost Value"]
     df["Return %"] = np.where(df["Cost Value"] > 0, df["Gain/Loss"] / df["Cost Value"] * 100, 0)
     return df
@@ -256,7 +281,7 @@ mortgage_raw = safe_load_sheet("mortgage", fallback_mortgage())
 portfolio = prepare_portfolio(portfolio_raw)
 
 cash = normalize_columns(cash_raw)
-amount_col = pick_col(cash, ["Amount", "Balance", "Value", "THB Value", "Cash"])
+amount_col = pick_col(cash, ["Amount", "Balance", "Value", "THB Value", "THBValue", "Cash"])
 fx_col = pick_col(cash, ["FX", "Exchange Rate", "Fx Rate"])
 if amount_col is None:
     cash["Amount"] = 0
@@ -269,14 +294,14 @@ else:
 cash["THB Value"] = cash["Amount"] * cash["FX"]
 
 properties = normalize_columns(properties_raw)
-property_value_col = pick_col(properties, ["Estimated Value", "Value", "Market Value", "Price", "Asset Value"])
+property_value_col = pick_col(properties, ["Estimated Value", "EstimatedValue", "Value", "Market Value", "MarketValue", "Price", "Asset Value", "AssetValue"])
 if property_value_col is None:
     properties["Estimated Value"] = 0
 else:
     properties["Estimated Value"] = to_number(properties[property_value_col])
 
 mortgage = normalize_columns(mortgage_raw)
-debt_col = pick_col(mortgage, ["Outstanding Balance", "Balance", "Debt", "Loan", "Principal"])
+debt_col = pick_col(mortgage, ["Outstanding Balance", "OutstandingBalance", "Balance", "Debt", "Loan", "Principal"])
 if debt_col is None:
     mortgage["Outstanding Balance"] = 0
 else:
@@ -367,7 +392,8 @@ with tab_portfolio:
 
     st.subheader("Holdings")
     show_cols = ["Symbol", "Name", "Asset Class", "Qty", "Avg Cost", "Current Price", "Market Value", "Gain/Loss", "Return %"]
-    st.dataframe(portfolio[show_cols].sort_values("Market Value", ascending=False), use_container_width=True)
+    view_portfolio = portfolio[show_cols].sort_values("Market Value", ascending=False)
+    st.dataframe(view_portfolio, use_container_width=True)
 
     st.subheader("Allocation by Asset Class")
     allocation = portfolio.groupby("Asset Class", as_index=False)["Market Value"].sum()
