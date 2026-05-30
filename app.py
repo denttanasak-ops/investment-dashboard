@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Investment Dashboard",
@@ -525,13 +525,17 @@ with tab_market:
     st.header("🔎 Market Analysis")
     st.caption("คงแท็บนี้ไว้สำหรับต่อยอดการวิเคราะห์ตลาด")
 
-    selected_symbol = st.text_input("Enter Symbol", value="MMYT")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    selected_symbol = c1.text_input("Enter Symbol", value="MMYT")
+    start_date = c2.date_input("Start Date", value=datetime.now().date() - timedelta(days=365))
+    end_date = c3.date_input("End Date", value=datetime.now().date())
+
     yf_symbol = normalize_symbol_for_yfinance(selected_symbol)
 
     if selected_symbol:
         try:
             ticker = yf.Ticker(yf_symbol)
-            hist = ticker.history(period="1y")
+            hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
             if hist.empty:
                 st.warning("ไม่พบข้อมูลราคา")
             else:
@@ -540,10 +544,10 @@ with tab_market:
 
                 last_price = hist["Close"].iloc[-1]
                 first_price = hist["Close"].iloc[0]
-                one_year_return = (last_price / first_price - 1) * 100
+                period_return = (last_price / first_price - 1) * 100
 
                 c1, c2 = st.columns(2)
                 c1.metric("Latest Price", f"{last_price:,.2f}")
-                c2.metric("1Y Return", pct(one_year_return))
+                c2.metric("Selected Period Return", pct(period_return))
         except Exception as e:
             st.error(f"โหลดข้อมูลไม่ได้: {e}")
