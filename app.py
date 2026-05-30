@@ -186,7 +186,7 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
         "Avg Cost": ["Avg Cost", "Average Cost", "AvgCost", "Cost", "Buy Price", "Average Price"],
         "Manual Price": ["Manual Price", "Current Price", "CurrentPrice", "Price", "Market Price", "MarketPrice", "Last Price", "LastPrice"],
         "Currency": ["Currency", "CCY"],
-        "FX": ["FX", "Exchange Rate", "Fx Rate", "THB Rate"],
+        "FX": ["FX", "Exchange Rate", "Fx Rate", "THB Rate", "ExchangeRate", "FxRate"],
     }
     for std_col, candidates in mappings.items():
         found = pick_col(df, candidates)
@@ -220,7 +220,9 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
         symbol_text = str(row["Symbol"]).strip().upper()
         asset_class_text = str(row["Asset Class"]).strip().lower()
 
-        if manual_price > 0:
+        if symbol_text in ["CASH", "CASH THB", "THB CASH", "เงินสด"]:
+            prices.append(1)
+        elif manual_price > 0:
             prices.append(manual_price)
         elif symbol_text.endswith("80") or "FUND" in asset_class_text or "GOLD" in asset_class_text or "กองทุน" in asset_class_text:
             prices.append(0)
@@ -229,13 +231,23 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
             prices.append(get_price_yfinance(yf_symbol))
 
     df["Current Price"] = pd.Series(prices).fillna(0)
+
+    # CASH ใน portfolio ให้ถือว่าเป็นเงินบาท 1:1 ไม่ให้ yfinance ไปตีเป็นหุ้นชื่อ CASH
+    cash_mask = df["Symbol"].astype(str).str.strip().str.upper().isin(["CASH", "CASH THB", "THB CASH", "เงินสด"])
+    df.loc[cash_mask, "FX"] = 1
+    df.loc[cash_mask, "Current Price"] = 1
+    df.loc[cash_mask & (df["Avg Cost"] == 0), "Avg Cost"] = 1
+    df.loc[cash_mask & (df["Asset Class"].astype(str).str.strip() == ""), "Asset Class"] = "Cash"
+
     df["Cost Value"] = df["Qty"] * df["Avg Cost"] * df["FX"]
     df["Market Value"] = df["Qty"] * df["Current Price"] * df["FX"]
 
     if cost_value_col is not None:
         df["Cost Value"] = to_number(df[cost_value_col])
     if market_value_col is not None:
-        df["Market Value"] = to_number(df[market_value_col])
+        sheet_market_value = to_number(df[market_value_col])
+        # ใช้ค่าจากชีตเฉพาะแถวที่มีค่ามากกว่า 0; ถ้าเป็น 0 ให้ใช้ราคาที่คำนวณแทน
+        df["Market Value"] = np.where(sheet_market_value > 0, sheet_market_value, df["Market Value"])
         df["Current Price"] = np.where(df["Qty"] > 0, df["Market Value"] / df["Qty"] / df["FX"], df["Current Price"])
 
     df["Gain/Loss"] = df["Market Value"] - df["Cost Value"]
