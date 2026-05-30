@@ -17,14 +17,16 @@ st.set_page_config(
 
 GOOGLE_SHEET_ID = "1NfxJUlUyFmeSFjFCNLF7Xoeuu_vP_dfk9Hi2HP7Yl_c"
 
-# ใส่ gid ของแต่ละชีตตรงนี้ ถ้ายังไม่มีชีตนั้น ระบบจะใช้ข้อมูลตัวอย่างแทน
-SHEET_GIDS = {
-    "portfolio": "315319388",
-    "cash": "0",
-    "properties": "0",
-    "mortgage": "0",
-    "targets": "0",
-    "transactions": "0",
+# ใช้ Google Sheet เป็นฐานข้อมูลหลัก
+# ชื่อด้านขวาต้องตรงกับชื่อแท็บล่างใน Google Sheet
+SHEET_NAMES = {
+    "portfolio": "portfolio",
+    "cash": "bank_accounts",
+    "properties": "properties",
+    "mortgage": "mortgage",
+    "property_cashflow": "property_cashflow",
+    "targets": "targets",
+    "transactions": "transactions",
 }
 
 DEFAULT_TARGET_VALUE = 20_000_000
@@ -35,38 +37,39 @@ DEFAULT_EXPECTED_RETURN = 0.08
 # HELPERS
 # =====================================================
 
-def google_sheet_csv_url(sheet_id: str, gid: str) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+def google_sheet_csv_url(sheet_id: str, sheet_name: str) -> str:
+    from urllib.parse import quote
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet_name)}"
 
 
 @st.cache_data(ttl=300)
-def load_google_sheet(gid: str) -> pd.DataFrame:
-    url = google_sheet_csv_url(GOOGLE_SHEET_ID, gid)
+def load_google_sheet(sheet_name: str) -> pd.DataFrame:
+    url = google_sheet_csv_url(GOOGLE_SHEET_ID, sheet_name)
     return pd.read_csv(url)
 
 
-def safe_load_sheet(sheet_name: str, fallback: pd.DataFrame) -> pd.DataFrame:
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def safe_load_sheet(sheet_key: str, fallback: pd.DataFrame) -> pd.DataFrame:
     try:
-        gid = SHEET_GIDS.get(sheet_name)
-        if not gid:
-            st.sidebar.warning(f"Sheet '{sheet_name}' ยังไม่ได้ใส่ gid")
+        real_sheet_name = SHEET_NAMES.get(sheet_key)
+        if not real_sheet_name:
+            st.sidebar.warning(f"ยังไม่ได้ตั้งชื่อแท็บสำหรับ '{sheet_key}'")
             return fallback.copy()
 
-        df = load_google_sheet(gid)
-
-        # ถ้า Google Sheet ไม่ได้เปิดสิทธิ์ Anyone with the link,
-        # บางครั้ง pandas จะอ่านหน้า HTML แทน CSV ทำให้ข้อมูลผิด
+        df = load_google_sheet(real_sheet_name)
         if df.empty:
-            st.sidebar.warning(f"Sheet '{sheet_name}' ว่างหรืออ่านไม่ได้")
+            st.sidebar.warning(f"แท็บ '{real_sheet_name}' ว่างหรืออ่านไม่ได้")
             return fallback.copy()
 
-        if len(df.columns) == 1 and "html" in str(df.columns[0]).lower():
-            st.sidebar.error(f"Sheet '{sheet_name}' อ่านไม่ได้: ต้อง Share เป็น Anyone with the link")
-            return fallback.copy()
-
-        return df
+        st.sidebar.success(f"โหลด Google Sheet แท็บ '{real_sheet_name}' ได้")
+        return normalize_columns(df)
     except Exception as e:
-        st.sidebar.error(f"โหลด Sheet '{sheet_name}' ไม่ได้: {e}")
+        st.sidebar.error(f"โหลด Google Sheet แท็บ '{SHEET_NAMES.get(sheet_key, sheet_key)}' ไม่ได้: {e}")
         return fallback.copy()
 
 
@@ -153,8 +156,36 @@ def fallback_mortgage():
     })
 
 
+def pick_col(df: pd.DataFrame, candidates, default=None):
+    lookup = {str(c).strip().lower(): c for c in df.columns}
+    for name in candidates:
+        key = str(name).strip().lower()
+        if key in lookup:
+            return lookup[key]
+    return default
+
+
 def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+    df = normalize_columns(df)
+
+    # รองรับชื่อคอลัมน์หลายแบบ เช่น symbol / Symbol, qty / Shares, avg_cost / Avg Cost
+    rename_map = {}
+    mappings = {
+        "Symbol": ["Symbol", "Ticker", "Code", "Asset", "Stock"],
+        "Name": ["Name", "Company", "Asset Name"],
+        "Asset Class": ["Asset Class", "AssetClass", "Class", "Type", "Category"],
+        "Qty": ["Qty", "Quantity", "Shares", "Units", "Amount"],
+        "Avg Cost": ["Avg Cost", "Average Cost", "AvgCost", "Cost", "Buy Price", "Average Price"],
+        "Manual Price": ["Manual Price", "Current Price", "Price", "Market Price", "Last Price"],
+        "Currency": ["Currency", "CCY"],
+        "FX": ["FX", "Exchange Rate", "Fx Rate", "THB Rate"],
+    }
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
     required = ["Symbol", "Name", "Asset Class", "Qty", "Avg Cost", "Manual Price", "Currency", "FX"]
     for col in required:
         if col not in df.columns:
@@ -224,24 +255,32 @@ mortgage_raw = safe_load_sheet("mortgage", fallback_mortgage())
 
 portfolio = prepare_portfolio(portfolio_raw)
 
-cash = cash_raw.copy()
-if "Amount" not in cash.columns:
+cash = normalize_columns(cash_raw)
+amount_col = pick_col(cash, ["Amount", "Balance", "Value", "THB Value", "Cash"])
+fx_col = pick_col(cash, ["FX", "Exchange Rate", "Fx Rate"])
+if amount_col is None:
     cash["Amount"] = 0
-if "FX" not in cash.columns:
+else:
+    cash["Amount"] = to_number(cash[amount_col])
+if fx_col is None:
     cash["FX"] = 1
-cash["Amount"] = to_number(cash["Amount"])
-cash["FX"] = to_number(cash["FX"]).replace(0, 1)
+else:
+    cash["FX"] = to_number(cash[fx_col]).replace(0, 1)
 cash["THB Value"] = cash["Amount"] * cash["FX"]
 
-properties = properties_raw.copy()
-if "Estimated Value" not in properties.columns:
+properties = normalize_columns(properties_raw)
+property_value_col = pick_col(properties, ["Estimated Value", "Value", "Market Value", "Price", "Asset Value"])
+if property_value_col is None:
     properties["Estimated Value"] = 0
-properties["Estimated Value"] = to_number(properties["Estimated Value"])
+else:
+    properties["Estimated Value"] = to_number(properties[property_value_col])
 
-mortgage = mortgage_raw.copy()
-if "Outstanding Balance" not in mortgage.columns:
+mortgage = normalize_columns(mortgage_raw)
+debt_col = pick_col(mortgage, ["Outstanding Balance", "Balance", "Debt", "Loan", "Principal"])
+if debt_col is None:
     mortgage["Outstanding Balance"] = 0
-mortgage["Outstanding Balance"] = to_number(mortgage["Outstanding Balance"])
+else:
+    mortgage["Outstanding Balance"] = to_number(mortgage[debt_col])
 
 portfolio_value = float(portfolio["Market Value"].sum())
 portfolio_cost = float(portfolio["Cost Value"].sum())
