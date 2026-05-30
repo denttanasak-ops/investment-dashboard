@@ -313,7 +313,7 @@ else:
     properties["Estimated Value"] = to_number(properties[property_value_col])
 
 mortgage = normalize_columns(mortgage_raw)
-debt_col = pick_col(mortgage, ["Outstanding Balance", "OutstandingBalance", "Balance", "Debt", "Loan", "Principal"])
+debt_col = pick_col(mortgage, ["Outstanding Balance", "OutstandingBalance", "Outstanding Debt", "OutstandingDebt", "Balance", "Debt", "Loan", "Principal"])
 if debt_col is None:
     mortgage["Outstanding Balance"] = 0
 else:
