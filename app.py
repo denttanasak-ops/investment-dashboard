@@ -396,6 +396,38 @@ with tab_wealth:
 # TAB 2: PORTFOLIO DASHBOARD
 # =====================================================
 
+def calculate_risk_metrics(price_df: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.DataFrame:
+    returns = price_df.pct_change().dropna()
+    rows = []
+    for asset in price_df.columns:
+        series = price_df[asset].dropna()
+        r = returns[asset].dropna() if asset in returns.columns else pd.Series(dtype=float)
+        if len(series) < 2 or r.empty:
+            continue
+
+        total_return = (series.iloc[-1] / series.iloc[0] - 1) * 100
+        years = max((series.index[-1] - series.index[0]).days / 365.25, 1 / 365.25)
+        cagr = ((series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1) * 100
+        volatility = r.std() * np.sqrt(252) * 100
+        sharpe = ((r.mean() * 252) - risk_free_rate) / (r.std() * np.sqrt(252)) if r.std() != 0 else 0
+        drawdown = series / series.cummax() - 1
+        max_drawdown = drawdown.min() * 100
+        best_day = r.max() * 100
+        worst_day = r.min() * 100
+
+        rows.append({
+            "Asset": asset,
+            "Total Return %": total_return,
+            "CAGR %": cagr,
+            "Volatility %": volatility,
+            "Sharpe": sharpe,
+            "Max Drawdown %": max_drawdown,
+            "Best Day %": best_day,
+            "Worst Day %": worst_day,
+        })
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=900)
 def get_portfolio_price_history(symbols: list, period: str = "1y") -> pd.DataFrame:
     y_symbols = []
