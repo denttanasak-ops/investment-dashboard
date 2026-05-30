@@ -49,12 +49,24 @@ def safe_load_sheet(sheet_name: str, fallback: pd.DataFrame) -> pd.DataFrame:
     try:
         gid = SHEET_GIDS.get(sheet_name)
         if not gid:
+            st.sidebar.warning(f"Sheet '{sheet_name}' ยังไม่ได้ใส่ gid")
             return fallback.copy()
+
         df = load_google_sheet(gid)
+
+        # ถ้า Google Sheet ไม่ได้เปิดสิทธิ์ Anyone with the link,
+        # บางครั้ง pandas จะอ่านหน้า HTML แทน CSV ทำให้ข้อมูลผิด
         if df.empty:
+            st.sidebar.warning(f"Sheet '{sheet_name}' ว่างหรืออ่านไม่ได้")
             return fallback.copy()
+
+        if len(df.columns) == 1 and "html" in str(df.columns[0]).lower():
+            st.sidebar.error(f"Sheet '{sheet_name}' อ่านไม่ได้: ต้อง Share เป็น Anyone with the link")
+            return fallback.copy()
+
         return df
-    except Exception:
+    except Exception as e:
+        st.sidebar.error(f"โหลด Sheet '{sheet_name}' ไม่ได้: {e}")
         return fallback.copy()
 
 
