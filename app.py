@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import altair as alt
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 st.set_page_config(
@@ -393,6 +396,50 @@ with tab_wealth:
 # TAB 2: PORTFOLIO DASHBOARD
 # =====================================================
 
+@st.cache_data(ttl=900)
+def get_portfolio_price_history(symbols: list, period: str = "1y") -> pd.DataFrame:
+    y_symbols = []
+    symbol_name_map = {}
+    skip_symbols = {"CASH", "CASH THB", "THB CASH", "เงินสด", "BRKB80", "K-USXNDQ-A(A)", "MTS-GOLD"}
+
+    for symbol in symbols:
+        raw = str(symbol).strip().upper()
+        if raw in skip_symbols or raw.endswith("80"):
+            continue
+        yf_symbol = normalize_symbol_for_yfinance(raw)
+        y_symbols.append(yf_symbol)
+        symbol_name_map[yf_symbol] = raw
+
+    if not y_symbols:
+        return pd.DataFrame()
+
+    try:
+        raw_data = yf.download(
+            tickers=list(dict.fromkeys(y_symbols)),
+            period=period,
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
+            threads=True,
+        )
+        if raw_data.empty:
+            return pd.DataFrame()
+
+        if isinstance(raw_data.columns, pd.MultiIndex):
+            close = raw_data["Close"] if "Close" in raw_data.columns.get_level_values(0) else raw_data.xs("Close", level=1, axis=1)
+        else:
+            close = raw_data["Close"] if "Close" in raw_data.columns else raw_data
+
+        if isinstance(close, pd.Series):
+            close = close.to_frame(name=y_symbols[0])
+
+        close.columns = [symbol_name_map.get(str(c).upper(), str(c).upper()) for c in close.columns]
+        close = close.dropna(how="all").ffill().bfill().dropna(axis=1, how="all")
+        return close
+    except Exception:
+        return pd.DataFrame()
+
+
 with tab_portfolio:
     st.header("📈 Portfolio Dashboard")
 
@@ -421,6 +468,30 @@ with tab_portfolio:
         st.info("ยังไม่มีสินทรัพย์ที่มีมูลค่า")
     else:
         st.bar_chart(top_holdings.set_index("Symbol")[["Market Value"]])
+
+    st.subheader("Portfolio Risk Metrics")
+    risk_period = st.selectbox("ช่วงเวลาคำนวณความเสี่ยง", ["6mo", "1y", "3y", "5y"], index=1, key="portfolio_risk_period")
+    portfolio_symbols = portfolio["Symbol"].dropna().astype(str).tolist()
+    portfolio_price_history = get_portfolio_price_history(portfolio_symbols, period=risk_period)
+
+    if portfolio_price_history.empty:
+        st.info("ยังไม่มีข้อมูลราคาย้อนหลังสำหรับคำนวณความเสี่ยงของหุ้นในพอร์ต หรือสินทรัพย์บางตัวต้องใช้ Manual Price")
+    else:
+        portfolio_risk_df = calculate_risk_metrics(portfolio_price_history)
+        if portfolio_risk_df.empty:
+            st.info("ข้อมูลยังไม่พอสำหรับคำนวณ risk metrics")
+        else:
+            st.dataframe(portfolio_risk_df.round(2), use_container_width=True, hide_index=True)
+
+        if len(portfolio_price_history.columns) >= 2:
+            st.subheader("Portfolio Holdings Correlation")
+            portfolio_returns = portfolio_price_history.pct_change().dropna()
+            portfolio_corr = portfolio_returns.corr()
+            portfolio_heatmap = px.imshow(portfolio_corr, text_auto=".2f", color_continuous_scale="RdBu_r")
+            portfolio_heatmap.update_layout(template="plotly_dark", height=520)
+            st.plotly_chart(portfolio_heatmap, use_container_width=True)
+
+        st.caption("หมายเหตุ: ค่านี้คำนวณได้เฉพาะสินทรัพย์ที่ yfinance มีข้อมูล เช่น MMYT, MELI, OKLO, RKLB ฯลฯ ส่วน BRKB80, กองทุนไทย, ทองไทย หรือ CASH จะยังไม่ถูกนำมาคำนวณในตารางนี้")
 
 # =====================================================
 # TAB 3: RETIREMENT PLAN
@@ -490,32 +561,168 @@ with tab_news:
 # TAB 5: MACRO DASHBOARD
 # =====================================================
 
+@st.cache_data(ttl=900)
+def get_macro_history(symbol_map: dict, start=None, end=None, period: str | None = None) -> pd.DataFrame:
+    tickers = [symbol for symbol in symbol_map.values() if symbol]
+    if not tickers:
+        return pd.DataFrame()
+
+    try:
+        if period:
+            raw = yf.download(tickers=tickers, period=period, auto_adjust=True, progress=False, group_by="column", threads=True)
+        else:
+            raw = yf.download(tickers=tickers, start=start, end=end, auto_adjust=True, progress=False, group_by="column", threads=True)
+
+        if raw.empty:
+            return pd.DataFrame()
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.xs("Close", level=1, axis=1)
+        else:
+            close = raw["Close"] if "Close" in raw.columns else raw
+
+        if isinstance(close, pd.Series):
+            close = close.to_frame(name=tickers[0])
+
+        reverse_map = {v: k for k, v in symbol_map.items()}
+        close.columns = [reverse_map.get(str(c), str(c)) for c in close.columns]
+        close = close.dropna(how="all").ffill().bfill().dropna(axis=1, how="all")
+        return close
+    except Exception:
+        return pd.DataFrame()
+
+
+def calculate_risk_metrics(price_df: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.DataFrame:
+    returns = price_df.pct_change().dropna()
+    rows = []
+    for asset in price_df.columns:
+        series = price_df[asset].dropna()
+        r = returns[asset].dropna() if asset in returns.columns else pd.Series(dtype=float)
+        if len(series) < 2 or r.empty:
+            continue
+
+        total_return = (series.iloc[-1] / series.iloc[0] - 1) * 100
+        years = max((series.index[-1] - series.index[0]).days / 365.25, 1 / 365.25)
+        cagr = ((series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1) * 100
+        volatility = r.std() * np.sqrt(252) * 100
+        sharpe = ((r.mean() * 252) - risk_free_rate) / (r.std() * np.sqrt(252)) if r.std() != 0 else 0
+        drawdown = series / series.cummax() - 1
+        max_drawdown = drawdown.min() * 100
+        best_day = r.max() * 100
+        worst_day = r.min() * 100
+
+        rows.append({
+            "Asset": asset,
+            "Total Return %": total_return,
+            "CAGR %": cagr,
+            "Volatility %": volatility,
+            "Sharpe": sharpe,
+            "Max Drawdown %": max_drawdown,
+            "Best Day %": best_day,
+            "Worst Day %": worst_day,
+        })
+    return pd.DataFrame(rows)
+
+
 with tab_macro:
     st.header("🌍 Macro Dashboard")
+    st.caption("เปรียบเทียบสินทรัพย์โลกแบบ log scale, momentum, risk metrics และ correlation")
 
-    macro_assets = pd.DataFrame({
-        "Name": ["S&P 500", "Nasdaq 100", "Bitcoin", "Gold Futures", "US 10Y Yield", "Dollar Index"],
-        "Symbol": ["^GSPC", "^NDX", "BTC-USD", "GC=F", "^TNX", "DX-Y.NYB"]
-    })
+    macro_universe = {
+        "SPY - US Market": "SPY",
+        "QQQ - US Tech / AI": "QQQ",
+        "SOXX - Semiconductor": "SOXX",
+        "XLV - Healthcare": "XLV",
+        "ITA - Aerospace": "ITA",
+        "XLE - Energy": "XLE",
+        "BRK-B - Berkshire": "BRK-B",
+        "INDA - India": "INDA",
+        "MCHI - China": "MCHI",
+        "THD - Thailand ETF": "THD",
+        "GLD - Gold": "GLD",
+        "BTC - Bitcoin": "BTC-USD",
+        "EEM - Emerging Markets": "EEM",
+        "EWJ - Japan": "EWJ",
+        "DXY - Dollar Index": "DX-Y.NYB",
+        "US10Y - US 10Y Yield": "^TNX",
+        "WTI - Oil": "CL=F",
+    }
 
-    rows = []
-    for _, row in macro_assets.iterrows():
-        price = get_price_yfinance(row["Symbol"])
-        rows.append({"Name": row["Name"], "Symbol": row["Symbol"], "Latest": price})
-    macro_df = pd.DataFrame(rows)
-
-    st.dataframe(macro_df, use_container_width=True)
-
-    st.subheader("Macro Watchlist")
-    st.markdown(
-        """
-        - S&P 500 / Nasdaq: ภาพรวมตลาดหุ้นสหรัฐ
-        - Bitcoin: สินทรัพย์เสี่ยงและกระแสเงินในตลาดคริปโต
-        - Gold: ความกลัว เงินเฟ้อ และ real yield
-        - US 10Y Yield: ต้นทุนเงินทุนของตลาดโลก
-        - Dollar Index: ค่าเงินดอลลาร์ กระทบสินทรัพย์เสี่ยงและทองคำ
-        """
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    selected_assets = c1.multiselect(
+        "เลือกสินทรัพย์ที่ต้องการเปรียบเทียบ",
+        options=list(macro_universe.keys()),
+        default=["SPY - US Market", "QQQ - US Tech / AI", "BTC - Bitcoin", "GLD - Gold", "INDA - India", "MCHI - China"],
     )
+    today = datetime.now().date()
+    start_date_macro = c2.date_input("วันที่เริ่มต้น", value=today - timedelta(days=365 * 5), key="macro_start")
+    end_date_macro = c3.date_input("วันที่สิ้นสุด", value=today, key="macro_end")
+    momentum_choice = c4.selectbox("Momentum", ["1M", "3M", "6M", "1Y"], index=1)
+
+    if start_date_macro >= end_date_macro or len(selected_assets) == 0:
+        st.warning("กรุณาเลือกช่วงเวลาและสินทรัพย์ให้ถูกต้อง")
+    else:
+        selected_map = {name: macro_universe[name] for name in selected_assets}
+        price_df = get_macro_history(selected_map, start=start_date_macro, end=end_date_macro + timedelta(days=1))
+
+        if price_df.empty:
+            st.warning("ยังโหลดข้อมูลไม่ได้จาก yfinance")
+        else:
+            returns = price_df.pct_change().dropna()
+            normalized = price_df.div(price_df.iloc[0]).mul(100)
+
+            latest_rows = []
+            for name in price_df.columns:
+                latest = price_df[name].dropna().iloc[-1]
+                first = price_df[name].dropna().iloc[0]
+                latest_rows.append({
+                    "Asset": name,
+                    "Symbol": selected_map.get(name, ""),
+                    "Latest": latest,
+                    "Total Return %": (latest / first - 1) * 100,
+                })
+            latest_df = pd.DataFrame(latest_rows)
+            st.subheader("Latest Macro Prices")
+            st.dataframe(latest_df.round(2), use_container_width=True, hide_index=True)
+
+            st.subheader("Performance Comparison: Indexed to 100 / Log Scale")
+            fig = go.Figure()
+            for asset in normalized.columns:
+                fig.add_trace(go.Scatter(x=normalized.index, y=normalized[asset], mode="lines", name=asset))
+            fig.update_layout(
+                template="plotly_dark",
+                height=650,
+                hovermode="x unified",
+                yaxis=dict(type="log", title="Normalized Performance, start = 100"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            days = {"1M": 21, "3M": 63, "6M": 126, "1Y": 252}[momentum_choice]
+            if len(price_df) > days:
+                momentum = ((price_df.iloc[-1] / price_df.iloc[-days]) - 1) * 100
+                momentum_df = pd.DataFrame({
+                    "Asset": momentum.sort_values(ascending=False).index,
+                    f"Momentum {momentum_choice} %": momentum.sort_values(ascending=False).values,
+                })
+                st.subheader(f"Momentum Ranking - {momentum_choice}")
+                st.dataframe(momentum_df.round(2), use_container_width=True, hide_index=True)
+
+            st.subheader("Risk Metrics")
+            risk_df = calculate_risk_metrics(price_df)
+            if risk_df.empty:
+                st.info("ข้อมูลยังไม่พอสำหรับคำนวณ risk metrics")
+            else:
+                st.dataframe(risk_df.round(2), use_container_width=True, hide_index=True)
+
+            if len(price_df.columns) >= 2 and not returns.empty:
+                st.subheader("Correlation Heatmap")
+                corr = returns.corr()
+                heatmap = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r")
+                heatmap.update_layout(template="plotly_dark", height=650)
+                st.plotly_chart(heatmap, use_container_width=True)
+
+            st.caption("หมายเหตุ: Risk metrics คำนวณจาก daily returns และ annualize ด้วย 252 trading days; Sharpe ในเวอร์ชันนี้ใช้ risk-free rate = 0 เพื่อดูเปรียบเทียบเบื้องต้น")
 
 # =====================================================
 # TAB 6: MARKET ANALYSIS
