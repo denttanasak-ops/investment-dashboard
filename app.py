@@ -1,11 +1,13 @@
-import os
+import json
 from datetime import date, timedelta
 
+import gspread
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+from google.oauth2.service_account import Credentials
 
 
 # =========================================================
@@ -15,20 +17,15 @@ import yfinance as yf
 st.set_page_config(page_title="Investment Dashboard", layout="wide")
 st.title("Investment Intelligence Dashboard")
 
-
-# =========================================================
-# Settings
-# =========================================================
-
-DATA_FILES = {
-    "portfolio": "portfolio.csv",
-    "bank_accounts": "bank_accounts.csv",
-    "properties": "properties.csv",
-    "mortgage": "mortgage.csv",
-    "property_cashflow": "property_cashflow.csv",
-}
-
 BASE_CURRENCY = "THB"
+
+SHEET_TABS = {
+    "portfolio": "portfolio",
+    "bank_accounts": "bank_accounts",
+    "properties": "properties",
+    "mortgage": "mortgage",
+    "property_cashflow": "property_cashflow",
+}
 
 DEFAULT_MARKET_ASSETS = {
     "SPY": "US Market",
@@ -44,6 +41,118 @@ DEFAULT_MARKET_ASSETS = {
     "GLD": "Gold",
     "BTC-USD": "Bitcoin",
 }
+
+
+# =========================================================
+# Google Sheets
+# =========================================================
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+def get_google_credentials():
+    if "gcp_service_account" not in st.secrets:
+        st.error(
+            "ยังไม่ได้ตั้งค่า Google Service Account ใน Streamlit secrets "
+            "ให้เพิ่ม [gcp_service_account] ก่อนใช้งาน"
+        )
+        st.stop()
+
+    service_account_info = dict(st.secrets["gcp_service_account"])
+    return Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES,
+    )
+
+
+@st.cache_resource
+def get_gsheet_client():
+    credentials = get_google_credentials()
+    return gspread.authorize(credentials)
+
+
+@st.cache_resource
+def get_spreadsheet():
+    if "GOOGLE_SHEET_ID" not in st.secrets:
+        st.error("ยังไม่ได้ตั้งค่า GOOGLE_SHEET_ID ใน Streamlit secrets")
+        st.stop()
+
+    client = get_gsheet_client()
+    return client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+
+
+def get_or_create_worksheet(sheet_name, headers):
+    spreadsheet = get_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet(sheet_name)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=sheet_name,
+            rows=200,
+            cols=max(len(headers), 8),
+        )
+        worksheet.update([headers])
+
+    values = worksheet.get_all_values()
+
+    if not values:
+        worksheet.update([headers])
+    elif values[0] != headers:
+        # Keep existing matching columns, add missing columns, preserve old data where possible
+        old_headers = values[0]
+        rows = values[1:]
+
+        normalized_rows = []
+        for row in rows:
+            old_row = dict(zip(old_headers, row))
+            normalized_rows.append([old_row.get(h, "") for h in headers])
+
+        worksheet.clear()
+        worksheet.update([headers] + normalized_rows)
+
+    return worksheet
+
+
+def read_sheet(sheet_name, columns):
+    headers = list(columns.keys())
+    worksheet = get_or_create_worksheet(sheet_name, headers)
+    records = worksheet.get_all_records()
+
+    if not records:
+        return pd.DataFrame(columns)
+
+    df = pd.DataFrame(records)
+
+    for col, default_value in columns.items():
+        if col not in df.columns:
+            df[col] = default_value
+
+    return df[headers]
+
+
+def write_sheet(sheet_name, df, columns):
+    headers = list(columns.keys())
+    worksheet = get_or_create_worksheet(sheet_name, headers)
+
+    save_df = df.copy()
+
+    for col, default_value in columns.items():
+        if col not in save_df.columns:
+            save_df[col] = default_value
+
+    save_df = save_df[headers]
+    save_df = save_df.fillna("")
+
+    worksheet.clear()
+    worksheet.update([headers] + save_df.astype(str).values.tolist())
+
+    st.cache_data.clear()
+    st.success(f"Saved to Google Sheet: {sheet_name}")
+    st.rerun()
 
 
 # =========================================================
@@ -64,32 +173,6 @@ def clean_currency(currency):
 
 def to_number(series, default=0):
     return pd.to_numeric(series, errors="coerce").fillna(default)
-
-
-def ensure_columns(df, required_columns):
-    for col, default_value in required_columns.items():
-        if col not in df.columns:
-            df[col] = default_value
-    return df[list(required_columns.keys())]
-
-
-def read_csv_or_template(path, required_columns):
-    if not os.path.exists(path):
-        return pd.DataFrame(required_columns)
-
-    try:
-        df = pd.read_csv(path)
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(required_columns)
-
-    return ensure_columns(df, required_columns)
-
-
-def save_csv(df, path):
-    df.to_csv(path, index=False)
-    st.success(f"Saved {path}")
-    st.cache_data.clear()
-    st.rerun()
 
 
 def get_asset_name(ticker):
@@ -175,38 +258,51 @@ def fx_to_thb(currency):
     return 1.0
 
 
-def render_editable_table(title, df, key, file_path, column_config=None):
-    st.markdown(f"### {title}")
-
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=key,
-        column_config=column_config,
-    )
-
-    if st.button(f"Save {title}", key=f"save_{key}"):
-        save_csv(edited_df, file_path)
-
-    return edited_df.copy()
-
-
 # =========================================================
 # Data Loaders
 # =========================================================
 
-def load_portfolio():
-    columns = {
-        "Broker": "",
-        "Ticker": "",
-        "Currency": "THB",
-        "Quantity": 0.0,
-        "AvgCost": 0.0,
-        "ManualPrice": 0.0,
-    }
+PORTFOLIO_COLUMNS = {
+    "Broker": "",
+    "Ticker": "",
+    "Currency": "THB",
+    "Quantity": 0.0,
+    "AvgCost": 0.0,
+    "ManualPrice": 0.0,
+}
 
-    df = read_csv_or_template(DATA_FILES["portfolio"], columns)
+BANK_COLUMNS = {
+    "Bank": "",
+    "Account": "",
+    "Balance": 0.0,
+    "Currency": "THB",
+}
+
+PROPERTY_COLUMNS = {
+    "Property": "",
+    "Type": "",
+    "EstimatedValue": 0.0,
+    "Location": "",
+}
+
+MORTGAGE_COLUMNS = {
+    "Property": "",
+    "OutstandingDebt": 0.0,
+    "MonthlyPayment": 0.0,
+    "InterestRate": 0.0,
+}
+
+CASHFLOW_COLUMNS = {
+    "Property": "",
+    "Month": "",
+    "Rent": 0.0,
+    "Expense": 0.0,
+    "ExtraPayment": 0.0,
+}
+
+
+def load_portfolio():
+    df = read_sheet(SHEET_TABS["portfolio"], PORTFOLIO_COLUMNS)
     df["Broker"] = df["Broker"].astype(str).str.strip()
     df["Ticker"] = df["Ticker"].apply(clean_ticker)
     df["Currency"] = df["Currency"].apply(clean_currency)
@@ -217,14 +313,7 @@ def load_portfolio():
 
 
 def load_banks():
-    columns = {
-        "Bank": "",
-        "Account": "",
-        "Balance": 0.0,
-        "Currency": "THB",
-    }
-
-    df = read_csv_or_template(DATA_FILES["bank_accounts"], columns)
+    df = read_sheet(SHEET_TABS["bank_accounts"], BANK_COLUMNS)
     df["Currency"] = df["Currency"].apply(clean_currency)
     df["Balance"] = to_number(df["Balance"])
     df["FxRateToTHB"] = df["Currency"].apply(fx_to_thb)
@@ -233,27 +322,13 @@ def load_banks():
 
 
 def load_properties():
-    columns = {
-        "Property": "",
-        "Type": "",
-        "EstimatedValue": 0.0,
-        "Location": "",
-    }
-
-    df = read_csv_or_template(DATA_FILES["properties"], columns)
+    df = read_sheet(SHEET_TABS["properties"], PROPERTY_COLUMNS)
     df["EstimatedValue"] = to_number(df["EstimatedValue"])
     return df
 
 
 def load_mortgage():
-    columns = {
-        "Property": "",
-        "OutstandingDebt": 0.0,
-        "MonthlyPayment": 0.0,
-        "InterestRate": 0.0,
-    }
-
-    df = read_csv_or_template(DATA_FILES["mortgage"], columns)
+    df = read_sheet(SHEET_TABS["mortgage"], MORTGAGE_COLUMNS)
     df["OutstandingDebt"] = to_number(df["OutstandingDebt"])
     df["MonthlyPayment"] = to_number(df["MonthlyPayment"])
     df["InterestRate"] = to_number(df["InterestRate"])
@@ -261,15 +336,7 @@ def load_mortgage():
 
 
 def load_property_cashflow():
-    columns = {
-        "Property": "",
-        "Month": "",
-        "Rent": 0.0,
-        "Expense": 0.0,
-        "ExtraPayment": 0.0,
-    }
-
-    df = read_csv_or_template(DATA_FILES["property_cashflow"], columns)
+    df = read_sheet(SHEET_TABS["property_cashflow"], CASHFLOW_COLUMNS)
     df["Rent"] = to_number(df["Rent"])
     df["Expense"] = to_number(df["Expense"])
     df["ExtraPayment"] = to_number(df["ExtraPayment"])
@@ -406,37 +473,6 @@ def render_portfolio_section():
                 step=0.000001,
                 format="%.6f",
             ),
-            "CurrentPrice": st.column_config.NumberColumn(
-                "CurrentPrice",
-                disabled=True,
-                format="%.6f",
-            ),
-            "PriceSource": st.column_config.TextColumn("PriceSource", disabled=True),
-            "FxRateToTHB": st.column_config.NumberColumn(
-                "FxRateToTHB",
-                disabled=True,
-                format="%.4f",
-            ),
-            "MarketValueNative": st.column_config.NumberColumn(
-                "MarketValueNative",
-                disabled=True,
-                format="%.2f",
-            ),
-            "MarketValueTHB": st.column_config.NumberColumn(
-                "MarketValueTHB",
-                disabled=True,
-                format="%.2f",
-            ),
-            "PnLTHB": st.column_config.NumberColumn(
-                "PnLTHB",
-                disabled=True,
-                format="%.2f",
-            ),
-            "ReturnPct": st.column_config.NumberColumn(
-                "ReturnPct",
-                disabled=True,
-                format="%.2f",
-            ),
         },
     )
 
@@ -453,7 +489,7 @@ def render_portfolio_section():
     save_df = save_df[save_df["Ticker"] != ""]
 
     if st.button("Save Portfolio", key="save_portfolio_main"):
-        save_csv(save_df, DATA_FILES["portfolio"])
+        write_sheet(SHEET_TABS["portfolio"], save_df, PORTFOLIO_COLUMNS)
 
     portfolio_calc = calculate_portfolio(save_df)
 
@@ -574,11 +610,11 @@ def render_bank_section():
 
     banks = load_banks()
 
-    edited = render_editable_table(
-        title="Bank Accounts",
-        df=banks[["Bank", "Account", "Balance", "Currency"]],
+    edited = st.data_editor(
+        banks[["Bank", "Account", "Balance", "Currency"]],
+        num_rows="dynamic",
+        use_container_width=True,
         key="bank_editor",
-        file_path=DATA_FILES["bank_accounts"],
         column_config={
             "Balance": st.column_config.NumberColumn("Balance", step=100.0),
             "Currency": st.column_config.SelectboxColumn(
@@ -593,6 +629,9 @@ def render_bank_section():
     edited["Balance"] = to_number(edited["Balance"])
     edited["FxRateToTHB"] = edited["Currency"].apply(fx_to_thb)
     edited["BalanceTHB"] = edited["Balance"] * edited["FxRateToTHB"]
+
+    if st.button("Save Bank Accounts", key="save_bank_accounts"):
+        write_sheet(SHEET_TABS["bank_accounts"], edited[["Bank", "Account", "Balance", "Currency"]], BANK_COLUMNS)
 
     bank_cash_value = edited["BalanceTHB"].sum()
 
@@ -627,12 +666,13 @@ def load_and_render_real_estate():
     c1, c2 = st.columns(2)
 
     with c1:
-        edited_properties = render_editable_table(
-            "Properties",
+        st.markdown("### Properties")
+        edited_properties = st.data_editor(
             properties,
-            "properties_editor",
-            DATA_FILES["properties"],
-            {
+            num_rows="dynamic",
+            use_container_width=True,
+            key="properties_editor",
+            column_config={
                 "EstimatedValue": st.column_config.NumberColumn(
                     "EstimatedValue",
                     step=10000.0,
@@ -640,13 +680,17 @@ def load_and_render_real_estate():
             },
         )
 
+        if st.button("Save Properties", key="save_properties"):
+            write_sheet(SHEET_TABS["properties"], edited_properties, PROPERTY_COLUMNS)
+
     with c2:
-        edited_mortgage = render_editable_table(
-            "Mortgage",
+        st.markdown("### Mortgage")
+        edited_mortgage = st.data_editor(
             mortgage,
-            "mortgage_editor",
-            DATA_FILES["mortgage"],
-            {
+            num_rows="dynamic",
+            use_container_width=True,
+            key="mortgage_editor",
+            column_config={
                 "OutstandingDebt": st.column_config.NumberColumn(
                     "OutstandingDebt",
                     step=10000.0,
@@ -662,12 +706,16 @@ def load_and_render_real_estate():
             },
         )
 
-    edited_cashflow = render_editable_table(
-        "Property Cash Flow",
+        if st.button("Save Mortgage", key="save_mortgage"):
+            write_sheet(SHEET_TABS["mortgage"], edited_mortgage, MORTGAGE_COLUMNS)
+
+    st.markdown("### Property Cash Flow")
+    edited_cashflow = st.data_editor(
         cashflow,
-        "cashflow_editor",
-        DATA_FILES["property_cashflow"],
-        {
+        num_rows="dynamic",
+        use_container_width=True,
+        key="cashflow_editor",
+        column_config={
             "Rent": st.column_config.NumberColumn("Rent", step=1000.0),
             "Expense": st.column_config.NumberColumn("Expense", step=1000.0),
             "ExtraPayment": st.column_config.NumberColumn(
@@ -676,6 +724,9 @@ def load_and_render_real_estate():
             ),
         },
     )
+
+    if st.button("Save Property Cash Flow", key="save_cashflow"):
+        write_sheet(SHEET_TABS["property_cashflow"], edited_cashflow, CASHFLOW_COLUMNS)
 
     edited_properties["EstimatedValue"] = to_number(
         edited_properties["EstimatedValue"]
@@ -761,7 +812,7 @@ def render_net_worth_summary(
     property_debt,
     property_equity,
 ):
-    st.header("Net Worth Summary")
+    st.header("Net Worth Dashboard")
 
     total_cash = portfolio_stats["portfolio_cash"] + bank_cash_value
     investment_value = portfolio_stats["investment_value"]
@@ -770,15 +821,35 @@ def render_net_worth_summary(
 
     net_worth = total_cash + investment_value + property_equity
 
+    # Monthly cashflow summary from Google Sheets
+    mortgage_df = load_mortgage()
+    cashflow_df = load_property_cashflow()
+
+    monthly_rent = cashflow_df["Rent"].sum() if not cashflow_df.empty else 0
+    monthly_expense = cashflow_df["Expense"].sum() if not cashflow_df.empty else 0
+    monthly_extra_payment = cashflow_df["ExtraPayment"].sum() if not cashflow_df.empty else 0
+    monthly_mortgage = mortgage_df["MonthlyPayment"].sum() if not mortgage_df.empty else 0
+    monthly_net_cashflow = monthly_rent - monthly_expense - monthly_mortgage - monthly_extra_payment
+
+    st.subheader("Overall Wealth")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Net Worth (THB)", f"{net_worth:,.2f}")
     c2.metric("Total Cash (THB)", f"{total_cash:,.2f}")
     c3.metric("Investment Value (THB)", f"{investment_value:,.2f}")
     c4.metric("Real Estate Equity (THB)", f"{property_equity:,.2f}")
 
-    c5, c6 = st.columns(2)
-    c5.metric("Investment Gain/Loss (THB)", f"{investment_pnl:,.2f}")
-    c6.metric("Investment Return %", f"{investment_return_pct:.2f}%")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Property Gross Value (THB)", f"{property_value:,.2f}")
+    c6.metric("Property Debt (THB)", f"{property_debt:,.2f}")
+    c7.metric("Investment Gain/Loss (THB)", f"{investment_pnl:,.2f}")
+    c8.metric("Investment Return %", f"{investment_return_pct:.2f}%")
+
+    st.subheader("Monthly Cash Flow")
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("Rent (THB/month)", f"{monthly_rent:,.2f}")
+    c10.metric("Expense (THB/month)", f"{monthly_expense:,.2f}")
+    c11.metric("Mortgage (THB/month)", f"{monthly_mortgage:,.2f}")
+    c12.metric("Net Cash Flow (THB/month)", f"{monthly_net_cashflow:,.2f}")
 
     networth_df = pd.DataFrame(
         {
@@ -794,22 +865,6 @@ def render_net_worth_summary(
             ],
         }
     )
-
-    st.dataframe(networth_df.round(2), use_container_width=True)
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        if networth_df["ValueTHB"].sum() != 0:
-            st.plotly_chart(
-                px.pie(
-                    networth_df,
-                    names="Category",
-                    values="ValueTHB",
-                    title="Net Worth Allocation (THB)",
-                ),
-                use_container_width=True,
-            )
 
     debt_df = pd.DataFrame(
         {
@@ -830,6 +885,27 @@ def render_net_worth_summary(
         }
     )
 
+    cashflow_df_summary = pd.DataFrame(
+        {
+            "Category": ["Rent", "Expense", "Mortgage", "Extra Payment", "Net Cash Flow"],
+            "ValueTHB": [monthly_rent, -monthly_expense, -monthly_mortgage, -monthly_extra_payment, monthly_net_cashflow],
+        }
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if networth_df["ValueTHB"].sum() != 0:
+            st.plotly_chart(
+                px.pie(
+                    networth_df,
+                    names="Category",
+                    values="ValueTHB",
+                    title="Net Worth Allocation (THB)",
+                ),
+                use_container_width=True,
+            )
+
     with c2:
         st.plotly_chart(
             px.bar(
@@ -840,6 +916,19 @@ def render_net_worth_summary(
             ),
             use_container_width=True,
         )
+
+    st.plotly_chart(
+        px.bar(
+            cashflow_df_summary,
+            x="Category",
+            y="ValueTHB",
+            title="Monthly Cash Flow Breakdown (THB)",
+        ),
+        use_container_width=True,
+    )
+
+    st.markdown("### Net Worth Breakdown")
+    st.dataframe(networth_df.round(2), use_container_width=True)
 
 
 # =========================================================
