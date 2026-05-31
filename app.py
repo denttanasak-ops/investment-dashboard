@@ -1,117 +1,115 @@
-import streamlit as st
-import pandas as pd
+from datetime import date, datetime, timedelta
+from urllib.parse import quote, quote_plus
+import xml.etree.ElementTree as ET
+
 import numpy as np
-import yfinance as yf
-import requests
-import altair as alt
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+import requests
+import streamlit as st
+import yfinance as yf
+
+
+# =====================================================
+# APP CONFIG
+# =====================================================
 
 st.set_page_config(
     page_title="Investment Dashboard",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
-# =====================================================
-# CONFIG
-# =====================================================
-
+BASE_CURRENCY = "THB"
 GOOGLE_SHEET_ID = "1NfxJUlUyFmeSFjFCNLF7Xoeuu_vP_dfk9Hi2HP7Yl_c"
 
-# ใช้ Google Sheet เป็นฐานข้อมูลหลัก
-# ชื่อด้านขวาต้องตรงกับชื่อแท็บล่างใน Google Sheet
-SHEET_NAMES = {
+SHEET_TABS = {
     "portfolio": "portfolio",
-    "cash": "bank_accounts",
+    "bank_accounts": "bank_accounts",
     "properties": "properties",
     "mortgage": "mortgage",
     "property_cashflow": "property_cashflow",
-    "targets": "targets",
-    "transactions": "transactions",
+    "watchlist": "watchlist",
+    "options": "options",
 }
 
 DEFAULT_TARGET_VALUE = 20_000_000
 DEFAULT_MONTHLY_CONTRIBUTION = 60_000
 DEFAULT_EXPECTED_RETURN = 0.08
 
+DEFAULT_MARKET_ASSETS = {
+    "SPY": "US Market",
+    "QQQ": "US Tech / AI",
+    "SOXX": "Semiconductor",
+    "XLV": "Healthcare",
+    "ITA": "Aerospace",
+    "XLE": "Energy",
+    "BRK-B": "Berkshire Hathaway",
+    "INDA": "India",
+    "MCHI": "China",
+    "THD": "Thailand ETF",
+    "GLD": "Gold",
+    "BTC-USD": "Bitcoin",
+    "EEM": "Emerging Markets",
+    "EWJ": "Japan",
+    "DX-Y.NYB": "Dollar Index",
+    "^TNX": "US 10Y Yield",
+    "CL=F": "Oil WTI",
+}
+
+MANUAL_ONLY_TICKERS = {
+    "CASH",
+    "CASH THB",
+    "THB CASH",
+    "เงินสด",
+    "BRKB80",
+    "K-USXNDQ-A(A)",
+    "MTS-GOLD",
+}
+
+
 # =====================================================
-# HELPERS
+# BASIC HELPERS
 # =====================================================
 
-def google_sheet_csv_url(sheet_id: str, sheet_name: str) -> str:
-    from urllib.parse import quote
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet_name)}"
+def clean_ticker(ticker):
+    if pd.isna(ticker):
+        return ""
+    return str(ticker).strip().upper()
 
 
-@st.cache_data(ttl=300)
-def load_google_sheet(sheet_name: str) -> pd.DataFrame:
-    url = google_sheet_csv_url(GOOGLE_SHEET_ID, sheet_name)
-    return pd.read_csv(url)
+def clean_currency(currency):
+    if pd.isna(currency) or str(currency).strip() == "":
+        return BASE_CURRENCY
+    return str(currency).strip().upper()
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # ตัดคอลัมน์ว่างที่ Google Sheet ส่งมา เช่น Unnamed: 4, Unnamed: 5
-    drop_cols = [c for c in df.columns if str(c).lower().startswith("unnamed")]
-    if drop_cols:
-        df = df.drop(columns=drop_cols)
-
-    # ตัดแถวว่างทั้งหมด
-    df = df.dropna(how="all")
-    return df
+def to_number(series, default=0):
+    if isinstance(series, pd.Series):
+        return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(default)
+    return pd.to_numeric(pd.Series(series), errors="coerce").fillna(default)
 
 
-def safe_load_sheet(sheet_key: str, fallback: pd.DataFrame) -> pd.DataFrame:
+def format_thb(value):
     try:
-        real_sheet_name = SHEET_NAMES.get(sheet_key)
-        if not real_sheet_name:
-            st.sidebar.warning(f"ยังไม่ได้ตั้งชื่อแท็บสำหรับ '{sheet_key}'")
-            return fallback.copy()
-
-        df = load_google_sheet(real_sheet_name)
-        if df.empty:
-            st.sidebar.warning(f"แท็บ '{real_sheet_name}' ว่างหรืออ่านไม่ได้")
-            return fallback.copy()
-
-        st.sidebar.success(f"โหลด Google Sheet แท็บ '{real_sheet_name}' ได้")
-        return normalize_columns(df)
-    except Exception as e:
-        st.sidebar.error(f"โหลด Google Sheet แท็บ '{SHEET_NAMES.get(sheet_key, sheet_key)}' ไม่ได้: {e}")
-        return fallback.copy()
-
-
-def to_number(series):
-    return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0)
-
-
-def money(value):
-    try:
-        return f"฿{value:,.0f}"
+        return f"฿{float(value):,.0f}"
     except Exception:
         return "฿0"
 
 
+def format_thb_2(value):
+    try:
+        return f"{float(value):,.2f} THB"
+    except Exception:
+        return "0.00 THB"
+
+
 def pct(value):
     try:
-        return f"{value:.2f}%"
+        return f"{float(value):.2f}%"
     except Exception:
         return "0.00%"
-
-
-@st.cache_data(ttl=300)
-def get_price_yfinance(symbol: str):
-    try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="5d")
-        if hist.empty:
-            return np.nan
-        return float(hist["Close"].iloc[-1])
-    except Exception:
-        return np.nan
 
 
 def normalize_symbol_for_yfinance(symbol: str) -> str:
@@ -128,43 +126,18 @@ def normalize_symbol_for_yfinance(symbol: str) -> str:
     return mapping.get(s, s)
 
 
-def fallback_portfolio():
-    return pd.DataFrame({
-        "Symbol": ["MMYT", "BRK.B", "MELI", "OKLO", "RKLB", "SERV", "TEM", "K-USXNDQ-A(A)", "MTS-GOLD"],
-        "Name": ["MakeMyTrip", "Berkshire Hathaway", "MercadoLibre", "Oklo", "Rocket Lab", "Serve Robotics", "Tempus AI", "NASDAQ Fund", "Gold"],
-        "Asset Class": ["US Stock", "US Stock", "US Stock", "US Stock", "US Stock", "US Stock", "US Stock", "Fund", "Gold"],
-        "Qty": [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        "Avg Cost": [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        "Manual Price": [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        "Currency": ["USD", "USD", "USD", "USD", "USD", "USD", "USD", "THB", "THB"],
-        "FX": [36, 36, 36, 36, 36, 36, 36, 1, 1],
-    })
+def get_asset_name(ticker):
+    ticker = clean_ticker(ticker)
+    return DEFAULT_MARKET_ASSETS.get(ticker, ticker)
 
 
-def fallback_cash():
-    return pd.DataFrame({
-        "Account": ["Bank Account", "Broker Cash", "Emergency Cash"],
-        "Amount": [0, 0, 0],
-        "Currency": ["THB", "THB", "THB"],
-        "FX": [1, 1, 1],
-    })
-
-
-def fallback_properties():
-    return pd.DataFrame({
-        "Property": ["Home"],
-        "Estimated Value": [0],
-        "Note": [""],
-    })
-
-
-def fallback_mortgage():
-    return pd.DataFrame({
-        "Debt Name": ["Mortgage"],
-        "Outstanding Balance": [0],
-        "Interest Rate": [0],
-        "Monthly Payment": [0],
-    })
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    drop_cols = [c for c in df.columns if str(c).lower().startswith("unnamed")]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    return df.dropna(how="all")
 
 
 def pick_col(df: pd.DataFrame, candidates, default=None):
@@ -176,20 +149,286 @@ def pick_col(df: pd.DataFrame, candidates, default=None):
     return default
 
 
-def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_columns(df, columns):
     df = normalize_columns(df)
+    for col, default in columns.items():
+        if col not in df.columns:
+            df[col] = default
+    return df[list(columns.keys())]
 
-    # รองรับชื่อคอลัมน์หลายแบบ เช่น symbol / Symbol, qty / Shares, avg_cost / Avg Cost
+
+# =====================================================
+# GOOGLE SHEET LOADERS
+# =====================================================
+
+@st.cache_data(ttl=60)
+def read_google_sheet_tab(sheet_name):
+    encoded_sheet = quote(sheet_name)
+    url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet}"
+    return pd.read_csv(url)
+
+
+def safe_read_tab(tab_key, fallback):
+    sheet_name = SHEET_TABS.get(tab_key)
+    if not sheet_name:
+        st.sidebar.warning(f"ยังไม่ได้ตั้งชื่อแท็บสำหรับ {tab_key}")
+        return fallback.copy()
+    try:
+        df = read_google_sheet_tab(sheet_name)
+        if df.empty:
+            st.sidebar.warning(f"แท็บ {sheet_name} ว่าง")
+            return fallback.copy()
+        st.sidebar.success(f"โหลด Google Sheet แท็บ '{sheet_name}' ได้")
+        return normalize_columns(df)
+    except Exception as e:
+        st.sidebar.warning(f"โหลดแท็บ '{sheet_name}' ไม่ได้: {e}")
+        return fallback.copy()
+
+
+# =====================================================
+# FALLBACK STRUCTURES
+# =====================================================
+
+PORTFOLIO_COLUMNS = {
+    "Broker": "",
+    "Ticker": "",
+    "Currency": "THB",
+    "Quantity": 0.0,
+    "AvgCost": 0.0,
+    "ManualPrice": 0.0,
+}
+
+BANK_COLUMNS = {
+    "Bank": "",
+    "Account": "",
+    "Balance": 0.0,
+    "Currency": "THB",
+}
+
+PROPERTY_COLUMNS = {
+    "Property": "",
+    "Type": "",
+    "EstimatedValue": 0.0,
+    "Location": "",
+}
+
+MORTGAGE_COLUMNS = {
+    "Property": "",
+    "OutstandingDebt": 0.0,
+    "MonthlyPayment": 0.0,
+    "InterestRate": 0.0,
+}
+
+CASHFLOW_COLUMNS = {
+    "Property": "",
+    "Month": "",
+    "Rent": 0.0,
+    "Expense": 0.0,
+    "ExtraPayment": 0.0,
+}
+
+WATCHLIST_COLUMNS = {
+    "Symbol": "",
+    "Name": "",
+    "Theme": "",
+    "TargetPrice": 0.0,
+    "Thesis": "",
+}
+
+OPTIONS_COLUMNS = {
+    "Underlying": "",
+    "OptionType": "",
+    "Strike": 0.0,
+    "Expiry": "",
+    "Contracts": 0.0,
+    "EntryPrice": 0.0,
+    "CurrentBid": 0.0,
+    "CurrentMark": 0.0,
+    "CurrentAsk": 0.0,
+    "Delta": 0.0,
+    "Gamma": 0.0,
+    "Theta": 0.0,
+    "Vega": 0.0,
+    "IV": 0.0,
+    "Volume": 0.0,
+    "OpenInterest": 0.0,
+    "Status": "OPEN",
+    "Note": "",
+}
+
+
+def fallback_portfolio():
+    return pd.DataFrame(PORTFOLIO_COLUMNS, index=[])
+
+
+def fallback_banks():
+    return pd.DataFrame(BANK_COLUMNS, index=[])
+
+
+def fallback_properties():
+    return pd.DataFrame(PROPERTY_COLUMNS, index=[])
+
+
+def fallback_mortgage():
+    return pd.DataFrame(MORTGAGE_COLUMNS, index=[])
+
+
+def fallback_cashflow():
+    return pd.DataFrame(CASHFLOW_COLUMNS, index=[])
+
+
+def fallback_watchlist():
+    return pd.DataFrame({
+        "Symbol": ["SPY", "QQQ", "BTC-USD", "GLD", "INDA", "MCHI", "NVDA", "GOOGL", "AMZN"],
+        "Name": ["S&P 500 ETF", "Nasdaq 100 ETF", "Bitcoin", "Gold ETF", "India ETF", "China ETF", "NVIDIA", "Alphabet", "Amazon"],
+        "Theme": ["US Market", "US Tech", "Crypto", "Gold", "India", "China", "AI", "Big Tech", "Big Tech"],
+        "TargetPrice": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "Thesis": ["", "", "", "", "", "", "", "", ""],
+    })
+
+
+def fallback_options():
+    return pd.DataFrame({
+        "Underlying": ["HD", "BKNG", "RKLB"],
+        "OptionType": ["PUT", "PUT", "CALL"],
+        "Strike": [320, 3800, 30],
+        "Expiry": ["2026-07-17", "2026-07-17", "2026-07-17"],
+        "Contracts": [1, 1, 2],
+        "EntryPrice": [14.40, 65.00, 2.10],
+        "CurrentBid": [14.15, 60.00, 2.15],
+        "CurrentMark": [14.15, 62.50, 2.35],
+        "CurrentAsk": [16.30, 68.00, 2.55],
+        "Delta": [-0.35, -0.28, 0.42],
+        "Gamma": [0.03, 0.01, 0.06],
+        "Theta": [-0.08, -0.12, -0.04],
+        "Vega": [0.22, 0.35, 0.18],
+        "IV": [0.32, 0.41, 0.58],
+        "Volume": [7000000, 8500000, 1609],
+        "OpenInterest": [1609, 32, 210],
+        "Status": ["WATCH", "WATCH", "OPEN"],
+        "Note": ["ตัวอย่าง", "ตัวอย่าง", "ตัวอย่าง"],
+    })
+
+
+# =====================================================
+# PRICE / FX
+# =====================================================
+
+@st.cache_data(ttl=300)
+def download_prices(tickers, start=None, end=None, period=None):
+    tickers = [normalize_symbol_for_yfinance(clean_ticker(t)) for t in tickers if clean_ticker(t)]
+    tickers = list(dict.fromkeys(tickers))
+    if not tickers:
+        return pd.DataFrame()
+
+    try:
+        data = yf.download(
+            tickers=tickers,
+            start=start,
+            end=end,
+            period=period,
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
+            threads=True,
+        )
+        if data.empty:
+            return pd.DataFrame()
+
+        if isinstance(data.columns, pd.MultiIndex):
+            close = data["Close"] if "Close" in data.columns.get_level_values(0) else data.xs("Close", level=1, axis=1)
+        else:
+            close = data["Close"] if "Close" in data.columns else data
+
+        if isinstance(close, pd.Series):
+            close = close.to_frame(name=tickers[0])
+
+        close.columns = [clean_ticker(c) for c in close.columns]
+        return close
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_current_prices(tickers):
+    tickers = [
+        clean_ticker(t) for t in tickers
+        if clean_ticker(t) and clean_ticker(t) not in MANUAL_ONLY_TICKERS and not clean_ticker(t).endswith("80")
+    ]
+    if not tickers:
+        return pd.Series(dtype=float)
+
+    prices = download_prices(tickers, period="7d")
+    if prices.empty:
+        return pd.Series(dtype=float)
+
+    latest = prices.ffill().iloc[-1]
+    latest.index = [clean_ticker(c) for c in latest.index]
+    return latest
+
+
+@st.cache_data(ttl=300)
+def get_usdthb_rate():
+    prices = download_prices(["USDTHB=X"], period="7d")
+    if prices.empty or "USDTHB=X" not in prices.columns:
+        return 36.0
+    rate = float(prices["USDTHB=X"].ffill().iloc[-1])
+    return rate if rate > 0 else 36.0
+
+
+def fx_to_thb(currency):
+    currency = clean_currency(currency)
+    if currency == "THB":
+        return 1.0
+    if currency == "USD":
+        return get_usdthb_rate()
+    return 1.0
+
+
+# =====================================================
+# LOAD DATA
+# =====================================================
+
+def load_portfolio():
+    raw = safe_read_tab("portfolio", fallback_portfolio())
+    df = normalize_columns(raw)
+
     rename_map = {}
     mappings = {
-        "Symbol": ["Symbol", "Ticker", "Code", "Asset", "Stock"],
-        "Name": ["Name", "Company", "Asset Name"],
-        "Asset Class": ["Asset Class", "AssetClass", "Class", "Type", "Category"],
-        "Qty": ["Qty", "Quantity", "Shares", "Units", "Amount"],
-        "Avg Cost": ["Avg Cost", "Average Cost", "AvgCost", "Cost", "Buy Price", "Average Price"],
-        "Manual Price": ["Manual Price", "Current Price", "CurrentPrice", "Price", "Market Price", "MarketPrice", "Last Price", "LastPrice"],
+        "Broker": ["Broker", "Account", "Platform"],
+        "Ticker": ["Ticker", "Symbol", "Code", "Asset", "Stock"],
         "Currency": ["Currency", "CCY"],
-        "FX": ["FX", "Exchange Rate", "Fx Rate", "THB Rate", "ExchangeRate", "FxRate"],
+        "Quantity": ["Quantity", "Qty", "Shares", "Units", "Amount"],
+        "AvgCost": ["AvgCost", "Avg Cost", "Average Cost", "AveragePrice", "Average Price", "Cost"],
+        "ManualPrice": ["ManualPrice", "Manual Price", "CurrentPrice", "Current Price", "Price", "MarketPrice", "Market Price"],
+    }
+
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, PORTFOLIO_COLUMNS)
+    df["Broker"] = df["Broker"].astype(str).str.strip()
+    df["Ticker"] = df["Ticker"].apply(clean_ticker)
+    df["Currency"] = df["Currency"].apply(clean_currency)
+    df["Quantity"] = to_number(df["Quantity"])
+    df["AvgCost"] = to_number(df["AvgCost"])
+    df["ManualPrice"] = to_number(df["ManualPrice"])
+    df = df[df["Ticker"] != ""]
+    return df
+
+
+def load_banks():
+    raw = safe_read_tab("bank_accounts", fallback_banks())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Bank": ["Bank", "Name"],
+        "Account": ["Account", "AccountName", "Account Name"],
+        "Balance": ["Balance", "Amount", "Value", "Cash", "THBValue", "THB Value"],
+        "Currency": ["Currency", "CCY"],
     }
     for std_col, candidates in mappings.items():
         found = pick_col(df, candidates)
@@ -197,65 +436,255 @@ def prepare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
             rename_map[found] = std_col
     df = df.rename(columns=rename_map)
 
-    required = ["Symbol", "Name", "Asset Class", "Qty", "Avg Cost", "Manual Price", "Currency", "FX"]
-    for col in required:
-        if col not in df.columns:
-            if col in ["Qty", "Avg Cost", "Manual Price", "FX"]:
-                df[col] = 0
-            elif col == "Currency":
-                df[col] = "THB"
-            else:
-                df[col] = ""
-
-    df["Qty"] = to_number(df["Qty"])
-    df["Avg Cost"] = to_number(df["Avg Cost"])
-    df["Manual Price"] = to_number(df["Manual Price"])
-    df["FX"] = to_number(df["FX"]).replace(0, 1)
-
-    # ถ้ามีคอลัมน์มูลค่ารวมในชีต ให้ใช้ค่าจากชีตเป็นหลัก
-    # เพื่อกันกรณี BRKB80 / กองทุนไทย / ทอง ที่ yfinance อาจตีราคาเป็นหุ้นสหรัฐผิดตัว
-    market_value_col = pick_col(df, ["Market Value", "MarketValue", "Current Value", "CurrentValue", "Value", "THB Value", "THBValue"])
-    cost_value_col = pick_col(df, ["Cost Value", "CostValue", "Total Cost", "TotalCost", "Invested", "Investment"])
-
-    prices = []
-    for _, row in df.iterrows():
-        manual_price = row["Manual Price"]
-        symbol_text = str(row["Symbol"]).strip().upper()
-        asset_class_text = str(row["Asset Class"]).strip().lower()
-
-        if symbol_text in ["CASH", "CASH THB", "THB CASH", "เงินสด"]:
-            prices.append(1)
-        elif manual_price > 0:
-            prices.append(manual_price)
-        elif symbol_text.endswith("80") or "FUND" in asset_class_text or "GOLD" in asset_class_text or "กองทุน" in asset_class_text:
-            prices.append(0)
-        else:
-            yf_symbol = normalize_symbol_for_yfinance(row["Symbol"])
-            prices.append(get_price_yfinance(yf_symbol))
-
-    df["Current Price"] = pd.Series(prices).fillna(0)
-
-    # CASH ใน portfolio ให้ถือว่าเป็นเงินบาท 1:1 ไม่ให้ yfinance ไปตีเป็นหุ้นชื่อ CASH
-    cash_mask = df["Symbol"].astype(str).str.strip().str.upper().isin(["CASH", "CASH THB", "THB CASH", "เงินสด"])
-    df.loc[cash_mask, "FX"] = 1
-    df.loc[cash_mask, "Current Price"] = 1
-    df.loc[cash_mask & (df["Avg Cost"] == 0), "Avg Cost"] = 1
-    df.loc[cash_mask & (df["Asset Class"].astype(str).str.strip() == ""), "Asset Class"] = "Cash"
-
-    df["Cost Value"] = df["Qty"] * df["Avg Cost"] * df["FX"]
-    df["Market Value"] = df["Qty"] * df["Current Price"] * df["FX"]
-
-    if cost_value_col is not None:
-        df["Cost Value"] = to_number(df[cost_value_col])
-    if market_value_col is not None:
-        sheet_market_value = to_number(df[market_value_col])
-        # ใช้ค่าจากชีตเฉพาะแถวที่มีค่ามากกว่า 0; ถ้าเป็น 0 ให้ใช้ราคาที่คำนวณแทน
-        df["Market Value"] = np.where(sheet_market_value > 0, sheet_market_value, df["Market Value"])
-        df["Current Price"] = np.where(df["Qty"] > 0, df["Market Value"] / df["Qty"] / df["FX"], df["Current Price"])
-
-    df["Gain/Loss"] = df["Market Value"] - df["Cost Value"]
-    df["Return %"] = np.where(df["Cost Value"] > 0, df["Gain/Loss"] / df["Cost Value"] * 100, 0)
+    df = ensure_columns(df, BANK_COLUMNS)
+    df["Currency"] = df["Currency"].apply(clean_currency)
+    df["Balance"] = to_number(df["Balance"])
+    df["FxRateToTHB"] = df["Currency"].apply(fx_to_thb)
+    df["BalanceTHB"] = df["Balance"] * df["FxRateToTHB"]
     return df
+
+
+def load_properties():
+    raw = safe_read_tab("properties", fallback_properties())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Property": ["Property", "Name"],
+        "Type": ["Type", "AssetType", "Asset Type"],
+        "EstimatedValue": ["EstimatedValue", "Estimated Value", "Value", "MarketValue", "Market Value", "Price"],
+        "Location": ["Location", "Province"],
+    }
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, PROPERTY_COLUMNS)
+    df["EstimatedValue"] = to_number(df["EstimatedValue"])
+    return df
+
+
+def load_mortgage():
+    raw = safe_read_tab("mortgage", fallback_mortgage())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Property": ["Property", "Name"],
+        "OutstandingDebt": ["OutstandingDebt", "Outstanding Debt", "OutstandingBalance", "Outstanding Balance", "Debt", "Loan", "Principal"],
+        "MonthlyPayment": ["MonthlyPayment", "Monthly Payment", "Payment"],
+        "InterestRate": ["InterestRate", "Interest Rate", "Rate"],
+    }
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, MORTGAGE_COLUMNS)
+    df["OutstandingDebt"] = to_number(df["OutstandingDebt"])
+    df["MonthlyPayment"] = to_number(df["MonthlyPayment"])
+    df["InterestRate"] = to_number(df["InterestRate"])
+    return df
+
+
+def load_property_cashflow():
+    raw = safe_read_tab("property_cashflow", fallback_cashflow())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Property": ["Property", "Name"],
+        "Month": ["Month"],
+        "Rent": ["Rent", "Income"],
+        "Expense": ["Expense", "Cost"],
+        "ExtraPayment": ["ExtraPayment", "Extra Payment", "Prepay"],
+    }
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, CASHFLOW_COLUMNS)
+    df["Rent"] = to_number(df["Rent"])
+    df["Expense"] = to_number(df["Expense"])
+    df["ExtraPayment"] = to_number(df["ExtraPayment"])
+    return df
+
+
+def load_watchlist():
+    raw = safe_read_tab("watchlist", fallback_watchlist())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Symbol": ["Symbol", "Ticker", "Code", "Asset", "Stock"],
+        "Name": ["Name", "Company", "Asset Name"],
+        "Theme": ["Theme", "Category", "AssetClass", "Asset Class", "Type"],
+        "TargetPrice": ["TargetPrice", "Target Price", "Target", "BuyPrice", "Buy Price"],
+        "Thesis": ["Thesis", "Reason", "Note", "Why"],
+    }
+
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, WATCHLIST_COLUMNS)
+    df["Symbol"] = df["Symbol"].apply(clean_ticker)
+    df["TargetPrice"] = to_number(df["TargetPrice"])
+    df = df[df["Symbol"] != ""].drop_duplicates(subset=["Symbol"])
+    return df
+
+
+
+def load_options():
+    raw = safe_read_tab("options", fallback_options())
+    df = normalize_columns(raw)
+
+    rename_map = {}
+    mappings = {
+        "Underlying": ["Underlying", "Ticker", "Symbol", "Stock"],
+        "OptionType": ["OptionType", "Type", "CallPut", "PutCall", "C/P"],
+        "Strike": ["Strike", "StrikePrice", "Strike Price"],
+        "Expiry": ["Expiry", "Expiration", "ExpirationDate", "Expiration Date"],
+        "Contracts": ["Contracts", "Contract", "Qty", "Quantity"],
+        "EntryPrice": ["EntryPrice", "Entry Price", "Entry", "Cost", "AvgCost", "Avg Cost"],
+        "CurrentBid": ["CurrentBid", "Bid"],
+        "CurrentMark": ["CurrentMark", "Mark", "Mid", "MarketPrice"],
+        "CurrentAsk": ["CurrentAsk", "Ask"],
+        "Delta": ["Delta"],
+        "Gamma": ["Gamma"],
+        "Theta": ["Theta"],
+        "Vega": ["Vega"],
+        "IV": ["IV", "ImpliedVolatility", "Implied Volatility"],
+        "Volume": ["Volume", "Vol"],
+        "OpenInterest": ["OpenInterest", "Open Interest", "OI"],
+        "Status": ["Status"],
+        "Note": ["Note", "Notes"],
+    }
+
+    for std_col, candidates in mappings.items():
+        found = pick_col(df, candidates)
+        if found is not None and found != std_col:
+            rename_map[found] = std_col
+    df = df.rename(columns=rename_map)
+
+    df = ensure_columns(df, OPTIONS_COLUMNS)
+    df["Underlying"] = df["Underlying"].apply(clean_ticker)
+    df["OptionType"] = df["OptionType"].astype(str).str.upper().str.strip()
+    for col in ["Strike", "Contracts", "EntryPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Delta", "Gamma", "Theta", "Vega", "IV", "Volume", "OpenInterest"]:
+        df[col] = to_number(df[col])
+
+    df = df[df["Underlying"] != ""]
+    return df
+
+
+# =====================================================
+# CALCULATIONS
+# =====================================================
+
+def calculate_portfolio(portfolio):
+    portfolio = portfolio.copy()
+    portfolio["Ticker"] = portfolio["Ticker"].apply(clean_ticker)
+    portfolio = portfolio[portfolio["Ticker"] != ""]
+    portfolio["Currency"] = portfolio["Currency"].apply(clean_currency)
+    portfolio["Quantity"] = to_number(portfolio["Quantity"])
+    portfolio["AvgCost"] = to_number(portfolio["AvgCost"])
+    portfolio["ManualPrice"] = to_number(portfolio["ManualPrice"])
+
+    tickers = portfolio.loc[
+        ~portfolio["Ticker"].isin(MANUAL_ONLY_TICKERS) & ~portfolio["Ticker"].str.endswith("80"),
+        "Ticker"
+    ].dropna().unique().tolist()
+
+    current_prices = get_current_prices(tickers)
+    portfolio["YFinanceSymbol"] = portfolio["Ticker"].apply(normalize_symbol_for_yfinance)
+    portfolio["YFinancePrice"] = portfolio["YFinanceSymbol"].map(current_prices)
+    portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "YFinancePrice"] = 1
+    portfolio["YFinancePrice"] = to_number(portfolio["YFinancePrice"])
+
+    portfolio["CurrentPrice"] = portfolio["YFinancePrice"]
+    use_manual = (portfolio["CurrentPrice"] == 0) & (portfolio["ManualPrice"] > 0)
+    portfolio.loc[use_manual, "CurrentPrice"] = portfolio.loc[use_manual, "ManualPrice"]
+    portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "CurrentPrice"] = 1
+
+    portfolio["PriceSource"] = "yfinance"
+    portfolio.loc[use_manual, "PriceSource"] = "manual"
+    portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "PriceSource"] = "cash"
+    portfolio.loc[portfolio["CurrentPrice"] == 0, "PriceSource"] = "missing"
+
+    portfolio["FxRateToTHB"] = portfolio["Currency"].apply(fx_to_thb)
+    portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "FxRateToTHB"] = 1
+
+    portfolio["CostBasisNative"] = portfolio["Quantity"] * portfolio["AvgCost"]
+    portfolio["MarketValueNative"] = portfolio["Quantity"] * portfolio["CurrentPrice"]
+    portfolio["PnLNative"] = portfolio["MarketValueNative"] - portfolio["CostBasisNative"]
+
+    portfolio["CostBasisTHB"] = portfolio["CostBasisNative"] * portfolio["FxRateToTHB"]
+    portfolio["MarketValueTHB"] = portfolio["MarketValueNative"] * portfolio["FxRateToTHB"]
+    portfolio["PnLTHB"] = portfolio["MarketValueTHB"] - portfolio["CostBasisTHB"]
+    portfolio["IsCash"] = portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"])
+
+    portfolio["ReturnPct"] = 0.0
+    mask = portfolio["CostBasisNative"] != 0
+    portfolio.loc[mask, "ReturnPct"] = portfolio.loc[mask, "PnLNative"] / portfolio.loc[mask, "CostBasisNative"] * 100
+
+    return portfolio
+
+
+def get_portfolio_stats(portfolio_calc):
+    cash = portfolio_calc[portfolio_calc["IsCash"]]
+    inv = portfolio_calc[~portfolio_calc["IsCash"]]
+
+    portfolio_cash = float(cash["MarketValueTHB"].sum())
+    investment_value = float(inv["MarketValueTHB"].sum())
+    investment_cost = float(inv["CostBasisTHB"].sum())
+    investment_pnl = investment_value - investment_cost
+    investment_return = investment_pnl / investment_cost * 100 if investment_cost else 0
+
+    return {
+        "portfolio_value": portfolio_cash + investment_value,
+        "portfolio_cash": portfolio_cash,
+        "investment_value": investment_value,
+        "investment_cost": investment_cost,
+        "investment_pnl": investment_pnl,
+        "investment_return_pct": investment_return,
+    }
+
+
+def get_real_estate_summary(properties, mortgage, cashflow):
+    real_estate = properties.merge(
+        mortgage[["Property", "OutstandingDebt", "MonthlyPayment", "InterestRate"]],
+        on="Property",
+        how="left",
+    )
+    real_estate["OutstandingDebt"] = to_number(real_estate["OutstandingDebt"])
+    real_estate["MonthlyPayment"] = to_number(real_estate["MonthlyPayment"])
+    real_estate["Equity"] = real_estate["EstimatedValue"] - real_estate["OutstandingDebt"]
+
+    cashflow = cashflow.copy()
+    cashflow["NetCashFlow"] = cashflow["Rent"] - cashflow["Expense"] - cashflow["ExtraPayment"]
+
+    monthly = {
+        "rent": float(cashflow["Rent"].sum()),
+        "expense": float(cashflow["Expense"].sum()),
+        "mortgage": float(mortgage["MonthlyPayment"].sum()),
+        "net": float(cashflow["Rent"].sum() - cashflow["Expense"].sum() - mortgage["MonthlyPayment"].sum()),
+    }
+
+    return (
+        float(real_estate["EstimatedValue"].sum()),
+        float(real_estate["OutstandingDebt"].sum()),
+        float(real_estate["Equity"].sum()),
+        real_estate,
+        cashflow,
+        monthly,
+    )
 
 
 def calculate_goal_projection(current_value, monthly_contribution, target_value, expected_return):
@@ -265,143 +694,25 @@ def calculate_goal_projection(current_value, monthly_contribution, target_value,
     monthly_rate = expected_return / 12
     value = current_value
     months = 0
+
     while value < target_value and months < 600:
         value = value * (1 + monthly_rate) + monthly_contribution
         months += 1
+
     return months, value
 
 
-def get_news_links(symbols):
-    rows = []
-    for symbol in symbols:
-        if not symbol:
-            continue
-        query = str(symbol).replace(" ", "+")
-        rows.append({
-            "Asset": symbol,
-            "Google News": f"https://news.google.com/search?q={query}",
-            "Yahoo Finance": f"https://finance.yahoo.com/quote/{normalize_symbol_for_yfinance(symbol)}"
-        })
-    return pd.DataFrame(rows)
-
-# =====================================================
-# LOAD DATA
-# =====================================================
-
-portfolio_raw = safe_load_sheet("portfolio", fallback_portfolio())
-cash_raw = safe_load_sheet("cash", fallback_cash())
-properties_raw = safe_load_sheet("properties", fallback_properties())
-mortgage_raw = safe_load_sheet("mortgage", fallback_mortgage())
-
-portfolio = prepare_portfolio(portfolio_raw)
-
-cash = normalize_columns(cash_raw)
-amount_col = pick_col(cash, ["Amount", "Balance", "Value", "THB Value", "THBValue", "Cash"])
-fx_col = pick_col(cash, ["FX", "Exchange Rate", "Fx Rate"])
-if amount_col is None:
-    cash["Amount"] = 0
-else:
-    cash["Amount"] = to_number(cash[amount_col])
-if fx_col is None:
-    cash["FX"] = 1
-else:
-    cash["FX"] = to_number(cash[fx_col]).replace(0, 1)
-cash["THB Value"] = cash["Amount"] * cash["FX"]
-
-properties = normalize_columns(properties_raw)
-property_value_col = pick_col(properties, ["Estimated Value", "EstimatedValue", "Value", "Market Value", "MarketValue", "Price", "Asset Value", "AssetValue"])
-if property_value_col is None:
-    properties["Estimated Value"] = 0
-else:
-    properties["Estimated Value"] = to_number(properties[property_value_col])
-
-mortgage = normalize_columns(mortgage_raw)
-debt_col = pick_col(mortgage, ["Outstanding Balance", "OutstandingBalance", "Outstanding Debt", "OutstandingDebt", "Balance", "Debt", "Loan", "Principal"])
-if debt_col is None:
-    mortgage["Outstanding Balance"] = 0
-else:
-    mortgage["Outstanding Balance"] = to_number(mortgage[debt_col])
-
-portfolio_value = float(portfolio["Market Value"].sum())
-portfolio_cost = float(portfolio["Cost Value"].sum())
-portfolio_gain = portfolio_value - portfolio_cost
-portfolio_return = (portfolio_gain / portfolio_cost * 100) if portfolio_cost > 0 else 0
-cash_value = float(cash["THB Value"].sum())
-property_value = float(properties["Estimated Value"].sum())
-debt_value = float(mortgage["Outstanding Balance"].sum())
-net_worth = portfolio_value + cash_value + property_value - debt_value
-
-# =====================================================
-# SIDEBAR
-# =====================================================
-
-st.sidebar.title("📊 Investment Dashboard")
-st.sidebar.caption("Version 1")
-
-if st.sidebar.button("🔄 Refresh Data"):
-    st.cache_data.clear()
-    st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.metric("Net Worth", money(net_worth))
-st.sidebar.metric("Portfolio", money(portfolio_value))
-st.sidebar.metric("Cash", money(cash_value))
-
-# =====================================================
-# TABS
-# =====================================================
-
-tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_market = st.tabs([
-    "💰 My Wealth",
-    "📈 Portfolio Dashboard",
-    "🎯 Retirement Plan",
-    "📰 Portfolio News",
-    "🌍 Macro Dashboard",
-    "🔎 Market Analysis",
-])
-
-# =====================================================
-# TAB 1: MY WEALTH
-# =====================================================
-
-with tab_wealth:
-    st.header("💰 My Wealth")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Net Worth", money(net_worth))
-    c2.metric("Portfolio", money(portfolio_value))
-    c3.metric("Cash", money(cash_value))
-    c4.metric("Debt", money(debt_value))
-
-    st.subheader("Wealth Breakdown")
-    wealth_df = pd.DataFrame({
-        "Category": ["Portfolio", "Cash", "Properties", "Debt"],
-        "Value": [portfolio_value, cash_value, property_value, -debt_value]
-    })
-    st.bar_chart(wealth_df.set_index("Category"))
-
-    st.subheader("Portfolio")
-    st.dataframe(portfolio[["Symbol", "Name", "Asset Class", "Qty", "Market Value", "Gain/Loss", "Return %"]], use_container_width=True)
-
-    st.subheader("Bank / Cash Accounts")
-    st.dataframe(cash, use_container_width=True)
-
-    st.subheader("Properties")
-    st.dataframe(properties, use_container_width=True)
-
-    st.subheader("Mortgage / Debt")
-    st.dataframe(mortgage, use_container_width=True)
-
-# =====================================================
-# TAB 2: PORTFOLIO DASHBOARD
-# =====================================================
-
 def calculate_risk_metrics(price_df: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.DataFrame:
+    if price_df.empty:
+        return pd.DataFrame()
+
     returns = price_df.pct_change().dropna()
     rows = []
+
     for asset in price_df.columns:
         series = price_df[asset].dropna()
         r = returns[asset].dropna() if asset in returns.columns else pd.Series(dtype=float)
+
         if len(series) < 2 or r.empty:
             continue
 
@@ -425,105 +736,306 @@ def calculate_risk_metrics(price_df: pd.DataFrame, risk_free_rate: float = 0.0) 
             "Best Day %": best_day,
             "Worst Day %": worst_day,
         })
+
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=900)
-def get_portfolio_price_history(symbols: list, period: str = "1y") -> pd.DataFrame:
-    y_symbols = []
-    symbol_name_map = {}
-    skip_symbols = {"CASH", "CASH THB", "THB CASH", "เงินสด", "BRKB80", "K-USXNDQ-A(A)", "MTS-GOLD"}
+def calculate_portfolio_level_risk(portfolio_calc, period="1y"):
+    inv = portfolio_calc[(~portfolio_calc["IsCash"]) & (portfolio_calc["MarketValueTHB"] > 0)].copy()
+    inv = inv[~inv["Ticker"].isin(MANUAL_ONLY_TICKERS)]
+    inv = inv[~inv["Ticker"].str.endswith("80")]
 
-    for symbol in symbols:
-        raw = str(symbol).strip().upper()
-        if raw in skip_symbols or raw.endswith("80"):
-            continue
-        yf_symbol = normalize_symbol_for_yfinance(raw)
-        y_symbols.append(yf_symbol)
-        symbol_name_map[yf_symbol] = raw
+    if inv.empty:
+        return {}, pd.DataFrame()
 
-    if not y_symbols:
-        return pd.DataFrame()
+    tickers = inv["Ticker"].tolist()
+    prices = download_prices(tickers, period=period)
 
+    if prices.empty:
+        return {}, prices
+
+    usable = [c for c in prices.columns if c in [normalize_symbol_for_yfinance(t) for t in tickers] or c in tickers]
+    prices = prices[usable].dropna(axis=1, how="all")
+    if prices.empty:
+        return {}, prices
+
+    weights = {}
+    total = inv["MarketValueTHB"].sum()
+    for _, row in inv.iterrows():
+        y = clean_ticker(normalize_symbol_for_yfinance(row["Ticker"]))
+        if y in prices.columns and total > 0:
+            weights[y] = row["MarketValueTHB"] / total
+        elif row["Ticker"] in prices.columns and total > 0:
+            weights[row["Ticker"]] = row["MarketValueTHB"] / total
+
+    if not weights:
+        return {}, prices
+
+    returns = prices.pct_change().dropna()
+    returns = returns[[c for c in returns.columns if c in weights]]
+    w = pd.Series(weights).reindex(returns.columns).fillna(0)
+    portfolio_returns = returns.dot(w)
+
+    if portfolio_returns.empty:
+        return {}, prices
+
+    nav = (1 + portfolio_returns).cumprod()
+    total_return = (nav.iloc[-1] / nav.iloc[0] - 1) * 100
+    years = max((nav.index[-1] - nav.index[0]).days / 365.25, 1 / 365.25)
+    cagr = ((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1) * 100
+    volatility = portfolio_returns.std() * np.sqrt(252) * 100
+    sharpe = (portfolio_returns.mean() * 252) / (portfolio_returns.std() * np.sqrt(252)) if portfolio_returns.std() != 0 else 0
+    max_drawdown = (nav / nav.cummax() - 1).min() * 100
+
+    metrics = {
+        "Portfolio Total Return": total_return,
+        "Portfolio CAGR": cagr,
+        "Portfolio Volatility": volatility,
+        "Portfolio Sharpe": sharpe,
+        "Portfolio Max Drawdown": max_drawdown,
+    }
+
+    return metrics, prices
+
+
+# =====================================================
+# NEWS
+# =====================================================
+
+@st.cache_data(ttl=1800)
+def fetch_google_news_rss(query: str, max_items: int = 5) -> list:
     try:
-        raw_data = yf.download(
-            tickers=list(dict.fromkeys(y_symbols)),
-            period=period,
-            auto_adjust=True,
-            progress=False,
-            group_by="column",
-            threads=True,
-        )
-        if raw_data.empty:
-            return pd.DataFrame()
+        q = quote_plus(query)
+        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
 
-        if isinstance(raw_data.columns, pd.MultiIndex):
-            close = raw_data["Close"] if "Close" in raw_data.columns.get_level_values(0) else raw_data.xs("Close", level=1, axis=1)
-        else:
-            close = raw_data["Close"] if "Close" in raw_data.columns else raw_data
+        root = ET.fromstring(response.content)
+        items = []
 
-        if isinstance(close, pd.Series):
-            close = close.to_frame(name=y_symbols[0])
+        for item in root.findall("./channel/item")[:max_items]:
+            title = item.findtext("title", default="").strip()
+            link = item.findtext("link", default="").strip()
+            pub_date = item.findtext("pubDate", default="").strip()
+            source_node = item.find("source")
+            source = source_node.text.strip() if source_node is not None and source_node.text else ""
 
-        close.columns = [symbol_name_map.get(str(c).upper(), str(c).upper()) for c in close.columns]
-        close = close.dropna(how="all").ffill().bfill().dropna(axis=1, how="all")
-        return close
+            items.append({
+                "title": title,
+                "source": source,
+                "published": pub_date,
+                "link": link,
+            })
+
+        return items
     except Exception:
-        return pd.DataFrame()
+        return []
 
+
+def build_news_query(symbol: str, name: str = "") -> str:
+    symbol = clean_ticker(symbol)
+    name = str(name).strip()
+
+    manual_queries = {
+        "BTC": "Bitcoin BTC",
+        "BTC-USD": "Bitcoin BTC",
+        "MTS-GOLD": "gold price gold market",
+        "GLD": "gold ETF gold price",
+        "GC=F": "gold futures price",
+        "BRKB80": "Berkshire Hathaway BRK.B",
+        "BRK.B": "Berkshire Hathaway BRK.B",
+        "BRK-B": "Berkshire Hathaway BRK.B",
+        "K-USXNDQ-A(A)": "Nasdaq 100 QQQ",
+        "CASH": "Federal Reserve interest rates US dollar",
+    }
+
+    if symbol in manual_queries:
+        return manual_queries[symbol]
+
+    if name:
+        return f"{symbol} {name} stock"
+
+    return f"{symbol} stock"
+
+
+# =====================================================
+# LOAD ALL DATA ONCE
+# =====================================================
+
+portfolio_raw = load_portfolio()
+banks = load_banks()
+properties = load_properties()
+mortgage = load_mortgage()
+cashflow = load_property_cashflow()
+watchlist = load_watchlist()
+options_df = load_options()
+
+portfolio_calc = calculate_portfolio(portfolio_raw)
+portfolio_stats = get_portfolio_stats(portfolio_calc)
+property_value, property_debt, property_equity, real_estate, cashflow_calc, monthly = get_real_estate_summary(properties, mortgage, cashflow)
+
+bank_cash = float(banks["BalanceTHB"].sum())
+total_cash = float(portfolio_stats["portfolio_cash"] + bank_cash)
+investment_value = float(portfolio_stats["investment_value"])
+net_worth = float(total_cash + investment_value + property_equity)
+
+
+# =====================================================
+# SIDEBAR
+# =====================================================
+
+st.sidebar.title("📊 Investment Dashboard")
+st.sidebar.caption("Version 2 - Investment Command Center")
+
+if st.sidebar.button("🔄 Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.metric("Net Worth", format_thb(net_worth))
+st.sidebar.metric("Investments", format_thb(investment_value))
+st.sidebar.metric("Cash", format_thb(total_cash))
+st.sidebar.metric("Property Equity", format_thb(property_equity))
+
+
+# =====================================================
+# TABS
+# =====================================================
+
+tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_watchlist, tab_options, tab_market = st.tabs([
+    "💰 My Wealth",
+    "📈 Portfolio Dashboard",
+    "🎯 Retirement Plan",
+    "📰 Portfolio News",
+    "🌍 Macro Dashboard",
+    "👀 Watchlist",
+    "🧨 Options War Room",
+    "🔎 Market Analysis",
+])
+
+
+# =====================================================
+# TAB 1: MY WEALTH
+# =====================================================
+
+with tab_wealth:
+    st.header("💰 My Wealth")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Net Worth", format_thb(net_worth))
+    c2.metric("Total Cash", format_thb(total_cash))
+    c3.metric("Investments", format_thb(investment_value))
+    c4.metric("Property Equity", format_thb(property_equity))
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Property Value", format_thb(property_value))
+    c6.metric("Property Debt", format_thb(property_debt))
+    c7.metric("Investment P/L", format_thb(portfolio_stats["investment_pnl"]))
+    c8.metric("Investment Return", pct(portfolio_stats["investment_return_pct"]))
+
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("Monthly Rent", format_thb(monthly["rent"]))
+    c10.metric("Monthly Expense", format_thb(monthly["expense"]))
+    c11.metric("Monthly Mortgage", format_thb(monthly["mortgage"]))
+    c12.metric("Monthly Net Cashflow", format_thb(monthly["net"]))
+
+    allocation = pd.DataFrame({
+        "Category": ["Cash", "Investments", "Property Equity"],
+        "ValueTHB": [total_cash, investment_value, property_equity],
+    })
+
+    debt = pd.DataFrame({
+        "Category": ["Cash", "Investments", "Property Gross Value", "Property Debt", "Net Worth"],
+        "ValueTHB": [total_cash, investment_value, property_value, -property_debt, net_worth],
+    })
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if allocation["ValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(allocation, names="Category", values="ValueTHB", title="Net Worth Allocation"), use_container_width=True)
+
+    with c2:
+        st.plotly_chart(px.bar(debt, x="Category", y="ValueTHB", title="Assets, Debt, and Net Worth"), use_container_width=True)
+
+    st.divider()
+    st.subheader("Investment Portfolio")
+    st.caption(f"Base Currency = THB | USD/THB = {get_usdthb_rate():,.4f}")
+    summary_cols = ["Broker", "Ticker", "Currency", "Quantity", "AvgCost", "CurrentPrice", "PriceSource", "MarketValueTHB", "PnLTHB", "ReturnPct"]
+    st.dataframe(portfolio_calc[summary_cols].round(2), use_container_width=True, hide_index=True)
+
+    st.subheader("Bank Accounts")
+    st.dataframe(banks.round(2), use_container_width=True, hide_index=True)
+
+    st.subheader("Real Estate")
+    st.dataframe(real_estate.round(2), use_container_width=True, hide_index=True)
+
+    st.subheader("Mortgage / Debt")
+    st.dataframe(mortgage.round(2), use_container_width=True, hide_index=True)
+
+    missing = portfolio_calc[(portfolio_calc["CurrentPrice"] == 0) & (~portfolio_calc["IsCash"])]
+    if not missing.empty:
+        st.warning("ยังไม่มีราคาสำหรับ: " + ", ".join(missing["Ticker"].unique()) + " — ให้ใส่ ManualPrice ใน Google Sheet")
+
+
+# =====================================================
+# TAB 2: PORTFOLIO DASHBOARD
+# =====================================================
 
 with tab_portfolio:
     st.header("📈 Portfolio Dashboard")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Portfolio Value", money(portfolio_value))
-    c2.metric("Cost", money(portfolio_cost))
-    c3.metric("Gain / Loss", money(portfolio_gain))
-    c4.metric("Return", pct(portfolio_return))
+    c1.metric("Portfolio Value", format_thb(portfolio_stats["portfolio_value"]))
+    c2.metric("Investment Value", format_thb(portfolio_stats["investment_value"]))
+    c3.metric("Investment P/L", format_thb(portfolio_stats["investment_pnl"]))
+    c4.metric("Investment Return", pct(portfolio_stats["investment_return_pct"]))
 
     st.subheader("Holdings")
-    show_cols = ["Symbol", "Name", "Asset Class", "Qty", "Avg Cost", "Current Price", "Market Value", "Gain/Loss", "Return %"]
-    view_portfolio = portfolio[show_cols].sort_values("Market Value", ascending=False)
-    st.dataframe(view_portfolio, use_container_width=True)
+    summary_cols = ["Broker", "Ticker", "Currency", "Quantity", "AvgCost", "CurrentPrice", "PriceSource", "MarketValueNative", "MarketValueTHB", "PnLTHB", "ReturnPct"]
+    st.dataframe(portfolio_calc[summary_cols].round(2).sort_values("MarketValueTHB", ascending=False), use_container_width=True, hide_index=True)
 
-    st.subheader("Allocation by Asset Class")
-    allocation = portfolio.groupby("Asset Class", as_index=False)["Market Value"].sum()
-    allocation = allocation[allocation["Market Value"] > 0]
-    if allocation.empty:
-        st.info("ยังไม่มีมูลค่าพอร์ต ให้กรอก Qty และราคาใน Google Sheet ก่อน")
-    else:
-        st.bar_chart(allocation.set_index("Asset Class"))
+    c1, c2 = st.columns(2)
+    with c1:
+        broker_summary = portfolio_calc.groupby("Broker", dropna=False)["MarketValueTHB"].sum().reset_index()
+        if broker_summary["MarketValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(broker_summary, names="Broker", values="MarketValueTHB", title="Allocation by Broker"), use_container_width=True)
 
-    st.subheader("Top Holdings")
-    top_holdings = portfolio[portfolio["Market Value"] > 0].sort_values("Market Value", ascending=False).head(10)
-    if top_holdings.empty:
-        st.info("ยังไม่มีสินทรัพย์ที่มีมูลค่า")
-    else:
-        st.bar_chart(top_holdings.set_index("Symbol")[["Market Value"]])
+    with c2:
+        ticker_summary = portfolio_calc.groupby("Ticker", dropna=False)["MarketValueTHB"].sum().reset_index()
+        if ticker_summary["MarketValueTHB"].sum() != 0:
+            st.plotly_chart(px.pie(ticker_summary, names="Ticker", values="MarketValueTHB", title="Allocation by Ticker"), use_container_width=True)
 
-    st.subheader("Portfolio Risk Metrics")
+    st.subheader("Portfolio Level Risk")
     risk_period = st.selectbox("ช่วงเวลาคำนวณความเสี่ยง", ["6mo", "1y", "3y", "5y"], index=1, key="portfolio_risk_period")
-    portfolio_symbols = portfolio["Symbol"].dropna().astype(str).tolist()
-    portfolio_price_history = get_portfolio_price_history(portfolio_symbols, period=risk_period)
+    portfolio_level_metrics, portfolio_price_history = calculate_portfolio_level_risk(portfolio_calc, period=risk_period)
 
-    if portfolio_price_history.empty:
-        st.info("ยังไม่มีข้อมูลราคาย้อนหลังสำหรับคำนวณความเสี่ยงของหุ้นในพอร์ต หรือสินทรัพย์บางตัวต้องใช้ Manual Price")
+    if portfolio_level_metrics:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Return", pct(portfolio_level_metrics["Portfolio Total Return"]))
+        c2.metric("CAGR", pct(portfolio_level_metrics["Portfolio CAGR"]))
+        c3.metric("Volatility", pct(portfolio_level_metrics["Portfolio Volatility"]))
+        c4.metric("Sharpe", f"{portfolio_level_metrics['Portfolio Sharpe']:.2f}")
+        c5.metric("Max Drawdown", pct(portfolio_level_metrics["Portfolio Max Drawdown"]))
     else:
-        portfolio_risk_df = calculate_risk_metrics(portfolio_price_history)
-        if portfolio_risk_df.empty:
-            st.info("ข้อมูลยังไม่พอสำหรับคำนวณ risk metrics")
-        else:
-            st.dataframe(portfolio_risk_df.round(2), use_container_width=True, hide_index=True)
+        st.info("ยังคำนวณ Portfolio Level Risk ไม่ได้ เพราะมีสินทรัพย์ manual price หรือข้อมูล yfinance ไม่พอ")
+
+    st.subheader("Risk Metrics by Holding")
+    if portfolio_price_history.empty:
+        st.info("ยังไม่มีข้อมูลราคาย้อนหลังสำหรับคำนวณความเสี่ยงรายตัว")
+    else:
+        risk_df = calculate_risk_metrics(portfolio_price_history)
+        st.dataframe(risk_df.round(2), use_container_width=True, hide_index=True)
 
         if len(portfolio_price_history.columns) >= 2:
             st.subheader("Portfolio Holdings Correlation")
-            portfolio_returns = portfolio_price_history.pct_change().dropna()
-            portfolio_corr = portfolio_returns.corr()
-            portfolio_heatmap = px.imshow(portfolio_corr, text_auto=".2f", color_continuous_scale="RdBu_r")
-            portfolio_heatmap.update_layout(template="plotly_dark", height=520)
-            st.plotly_chart(portfolio_heatmap, use_container_width=True)
+            corr = portfolio_price_history.pct_change().dropna().corr()
+            heatmap = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r")
+            heatmap.update_layout(template="plotly_dark", height=520)
+            st.plotly_chart(heatmap, use_container_width=True)
 
-        st.caption("หมายเหตุ: ค่านี้คำนวณได้เฉพาะสินทรัพย์ที่ yfinance มีข้อมูล เช่น MMYT, MELI, OKLO, RKLB ฯลฯ ส่วน BRKB80, กองทุนไทย, ทองไทย หรือ CASH จะยังไม่ถูกนำมาคำนวณในตารางนี้")
+    st.caption("หมายเหตุ: Risk metrics คำนวณเฉพาะสินทรัพย์ที่ yfinance มีข้อมูล ส่วน BRKB80, กองทุนไทย, ทองไทย หรือ CASH ต้องใช้ manual price จึงยังไม่รวมใน risk calculation")
+
 
 # =====================================================
 # TAB 3: RETIREMENT PLAN
@@ -531,8 +1043,6 @@ with tab_portfolio:
 
 with tab_retirement:
     st.header("🎯 Retirement Plan")
-
-    st.caption("ค่าเริ่มต้นตามที่คุยกัน: เป้าหมาย 20 ล้านบาท เติมเงินเดือนละ 60,000 บาท")
 
     c1, c2, c3 = st.columns(3)
     target_value = c1.number_input("Target Value", min_value=0, value=DEFAULT_TARGET_VALUE, step=100_000)
@@ -544,28 +1054,27 @@ with tab_retirement:
     years_needed = months_needed / 12
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current Net Worth", money(net_worth))
-    c2.metric("Target", money(target_value))
+    c1.metric("Current Net Worth", format_thb(net_worth))
+    c2.metric("Target", format_thb(target_value))
     c3.metric("Progress", pct(progress * 100))
     c4.metric("Estimated Time", f"{years_needed:.1f} years")
 
     st.progress(progress)
 
-    st.subheader("Projection")
     projection_rows = []
     value = net_worth
     monthly_rate = expected_return / 12
+
     for month in range(0, 121):
         if month > 0:
             value = value * (1 + monthly_rate) + monthly_contribution
         if month % 12 == 0:
-            projection_rows.append({
-                "Year": month // 12,
-                "Projected Value": value
-            })
+            projection_rows.append({"Year": month // 12, "Projected Value": value})
+
     projection_df = pd.DataFrame(projection_rows)
     st.line_chart(projection_df.set_index("Year"))
-    st.dataframe(projection_df, use_container_width=True)
+    st.dataframe(projection_df, use_container_width=True, hide_index=True)
+
 
 # =====================================================
 # TAB 4: PORTFOLIO NEWS
@@ -573,94 +1082,81 @@ with tab_retirement:
 
 with tab_news:
     st.header("📰 Portfolio News")
-    st.caption("Version 1 จะทำเป็นลิงก์ข่าวเฉพาะสินทรัพย์ที่ถือก่อน ต่อไปค่อยทำ AI Summary")
+    st.caption("ข่าวล่าสุดจาก Google News RSS ทั้งจากสินทรัพย์ในพอร์ตและ watchlist")
 
-    symbols = portfolio["Symbol"].dropna().astype(str).unique().tolist()
-    news_df = get_news_links(symbols)
-    st.dataframe(
-        news_df,
-        column_config={
-            "Google News": st.column_config.LinkColumn("Google News"),
-            "Yahoo Finance": st.column_config.LinkColumn("Yahoo Finance"),
-        },
-        use_container_width=True,
-        hide_index=True,
+    portfolio_news_assets = portfolio_calc[["Ticker", "Broker"]].copy()
+    portfolio_news_assets = portfolio_news_assets.rename(columns={"Ticker": "Symbol", "Broker": "Theme"})
+    portfolio_news_assets["Name"] = ""
+    portfolio_news_assets["Source"] = "Portfolio"
+
+    watchlist_news_assets = watchlist[["Symbol", "Name", "Theme"]].copy()
+    watchlist_news_assets["Source"] = "Watchlist"
+
+    news_assets = pd.concat([portfolio_news_assets, watchlist_news_assets], ignore_index=True)
+    news_assets["Symbol"] = news_assets["Symbol"].apply(clean_ticker)
+    news_assets = news_assets[news_assets["Symbol"] != ""]
+    news_assets = news_assets[~news_assets["Symbol"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"])]
+    news_assets = news_assets.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    selected_news_symbols = c1.multiselect(
+        "เลือกสินทรัพย์ที่ต้องการดูข่าว",
+        options=news_assets["Symbol"].tolist(),
+        default=news_assets["Symbol"].head(8).tolist(),
     )
+    news_per_asset = c2.selectbox("จำนวนข่าวต่อสินทรัพย์", [1, 2, 3, 5], index=1)
+    source_filter = c3.selectbox("แหล่งรายการ", ["ทั้งหมด", "Portfolio", "Watchlist"], index=0)
 
-    st.info("ถ้าจะให้ระบบสรุปข่าวจริงในหน้าเว็บ ต้องเพิ่ม News API หรือใช้ RSS ในเวอร์ชันถัดไป")
+    if source_filter != "ทั้งหมด":
+        display_assets = news_assets[(news_assets["Symbol"].isin(selected_news_symbols)) & (news_assets["Source"] == source_filter)]
+    else:
+        display_assets = news_assets[news_assets["Symbol"].isin(selected_news_symbols)]
+
+    if display_assets.empty:
+        st.info("ยังไม่มีสินทรัพย์ให้แสดงข่าว")
+    else:
+        for _, asset in display_assets.iterrows():
+            symbol = asset.get("Symbol", "")
+            name = asset.get("Name", "")
+            theme = asset.get("Theme", "")
+            source_type = asset.get("Source", "")
+            query = build_news_query(symbol, name)
+            news_items = fetch_google_news_rss(query, max_items=news_per_asset)
+
+            st.markdown(f"### {symbol} {f'— {name}' if str(name).strip() else ''}")
+            st.caption(f"{source_type} | {theme} | query: {query}")
+
+            if not news_items:
+                st.info("ยังไม่พบข่าวจาก RSS สำหรับรายการนี้")
+            else:
+                for item in news_items:
+                    title = item.get("title", "")
+                    source = item.get("source", "")
+                    published = item.get("published", "")
+                    link = item.get("link", "")
+
+                    st.markdown(f"- **{title}**")
+                    detail_line = ""
+                    if source:
+                        detail_line += f"แหล่งข่าว: {source}"
+                    if published:
+                        detail_line += f" | เวลา: {published}"
+                    if detail_line:
+                        st.caption(detail_line)
+                    if link:
+                        st.markdown(f"  [อ่านข่าวต้นฉบับ]({link})")
+            st.divider()
+
 
 # =====================================================
 # TAB 5: MACRO DASHBOARD
 # =====================================================
 
-@st.cache_data(ttl=900)
-def get_macro_history(symbol_map: dict, start=None, end=None, period: str | None = None) -> pd.DataFrame:
-    tickers = [symbol for symbol in symbol_map.values() if symbol]
-    if not tickers:
-        return pd.DataFrame()
-
-    try:
-        if period:
-            raw = yf.download(tickers=tickers, period=period, auto_adjust=True, progress=False, group_by="column", threads=True)
-        else:
-            raw = yf.download(tickers=tickers, start=start, end=end, auto_adjust=True, progress=False, group_by="column", threads=True)
-
-        if raw.empty:
-            return pd.DataFrame()
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.xs("Close", level=1, axis=1)
-        else:
-            close = raw["Close"] if "Close" in raw.columns else raw
-
-        if isinstance(close, pd.Series):
-            close = close.to_frame(name=tickers[0])
-
-        reverse_map = {v: k for k, v in symbol_map.items()}
-        close.columns = [reverse_map.get(str(c), str(c)) for c in close.columns]
-        close = close.dropna(how="all").ffill().bfill().dropna(axis=1, how="all")
-        return close
-    except Exception:
-        return pd.DataFrame()
-
-
-def calculate_risk_metrics(price_df: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.DataFrame:
-    returns = price_df.pct_change().dropna()
-    rows = []
-    for asset in price_df.columns:
-        series = price_df[asset].dropna()
-        r = returns[asset].dropna() if asset in returns.columns else pd.Series(dtype=float)
-        if len(series) < 2 or r.empty:
-            continue
-
-        total_return = (series.iloc[-1] / series.iloc[0] - 1) * 100
-        years = max((series.index[-1] - series.index[0]).days / 365.25, 1 / 365.25)
-        cagr = ((series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1) * 100
-        volatility = r.std() * np.sqrt(252) * 100
-        sharpe = ((r.mean() * 252) - risk_free_rate) / (r.std() * np.sqrt(252)) if r.std() != 0 else 0
-        drawdown = series / series.cummax() - 1
-        max_drawdown = drawdown.min() * 100
-        best_day = r.max() * 100
-        worst_day = r.min() * 100
-
-        rows.append({
-            "Asset": asset,
-            "Total Return %": total_return,
-            "CAGR %": cagr,
-            "Volatility %": volatility,
-            "Sharpe": sharpe,
-            "Max Drawdown %": max_drawdown,
-            "Best Day %": best_day,
-            "Worst Day %": worst_day,
-        })
-    return pd.DataFrame(rows)
-
-
 with tab_macro:
     st.header("🌍 Macro Dashboard")
     st.caption("เปรียบเทียบสินทรัพย์โลกแบบ log scale, momentum, risk metrics และ correlation")
 
-    macro_universe = {
+    macro_options = {
         "SPY - US Market": "SPY",
         "QQQ - US Tech / AI": "QQQ",
         "SOXX - Semiconductor": "SOXX",
@@ -683,10 +1179,10 @@ with tab_macro:
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     selected_assets = c1.multiselect(
         "เลือกสินทรัพย์ที่ต้องการเปรียบเทียบ",
-        options=list(macro_universe.keys()),
+        options=list(macro_options.keys()),
         default=["SPY - US Market", "QQQ - US Tech / AI", "BTC - Bitcoin", "GLD - Gold", "INDA - India", "MCHI - China"],
     )
-    today = datetime.now().date()
+    today = date.today()
     start_date_macro = c2.date_input("วันที่เริ่มต้น", value=today - timedelta(days=365 * 5), key="macro_start")
     end_date_macro = c3.date_input("วันที่สิ้นสุด", value=today, key="macro_end")
     momentum_choice = c4.selectbox("Momentum", ["1M", "3M", "6M", "1Y"], index=1)
@@ -694,28 +1190,33 @@ with tab_macro:
     if start_date_macro >= end_date_macro or len(selected_assets) == 0:
         st.warning("กรุณาเลือกช่วงเวลาและสินทรัพย์ให้ถูกต้อง")
     else:
-        selected_map = {name: macro_universe[name] for name in selected_assets}
-        price_df = get_macro_history(selected_map, start=start_date_macro, end=end_date_macro + timedelta(days=1))
+        selected_map = {name: macro_options[name] for name in selected_assets}
+        symbol_map = {v: k for k, v in selected_map.items()}
+        data = download_prices(list(selected_map.values()), start=start_date_macro, end=end_date_macro + timedelta(days=1))
 
-        if price_df.empty:
+        if data.empty:
             st.warning("ยังโหลดข้อมูลไม่ได้จาก yfinance")
         else:
-            returns = price_df.pct_change().dropna()
-            normalized = price_df.div(price_df.iloc[0]).mul(100)
+            renamed_cols = {}
+            for col in data.columns:
+                renamed_cols[col] = symbol_map.get(col, col)
+            data = data.rename(columns=renamed_cols)
+            data = data.ffill().bfill().dropna(axis=1, how="all")
+            returns = data.pct_change().dropna()
+            normalized = data.div(data.iloc[0]).mul(100)
 
             latest_rows = []
-            for name in price_df.columns:
-                latest = price_df[name].dropna().iloc[-1]
-                first = price_df[name].dropna().iloc[0]
+            for name in data.columns:
+                latest = data[name].dropna().iloc[-1]
+                first = data[name].dropna().iloc[0]
                 latest_rows.append({
                     "Asset": name,
-                    "Symbol": selected_map.get(name, ""),
                     "Latest": latest,
                     "Total Return %": (latest / first - 1) * 100,
                 })
-            latest_df = pd.DataFrame(latest_rows)
+
             st.subheader("Latest Macro Prices")
-            st.dataframe(latest_df.round(2), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(latest_rows).round(2), use_container_width=True, hide_index=True)
 
             st.subheader("Performance Comparison: Indexed to 100 / Log Scale")
             fig = go.Figure()
@@ -731,8 +1232,8 @@ with tab_macro:
             st.plotly_chart(fig, use_container_width=True)
 
             days = {"1M": 21, "3M": 63, "6M": 126, "1Y": 252}[momentum_choice]
-            if len(price_df) > days:
-                momentum = ((price_df.iloc[-1] / price_df.iloc[-days]) - 1) * 100
+            if len(data) > days:
+                momentum = ((data.iloc[-1] / data.iloc[-days]) - 1) * 100
                 momentum_df = pd.DataFrame({
                     "Asset": momentum.sort_values(ascending=False).index,
                     f"Momentum {momentum_choice} %": momentum.sort_values(ascending=False).values,
@@ -741,52 +1242,275 @@ with tab_macro:
                 st.dataframe(momentum_df.round(2), use_container_width=True, hide_index=True)
 
             st.subheader("Risk Metrics")
-            risk_df = calculate_risk_metrics(price_df)
-            if risk_df.empty:
-                st.info("ข้อมูลยังไม่พอสำหรับคำนวณ risk metrics")
-            else:
-                st.dataframe(risk_df.round(2), use_container_width=True, hide_index=True)
+            risk_df = calculate_risk_metrics(data)
+            st.dataframe(risk_df.round(2), use_container_width=True, hide_index=True)
 
-            if len(price_df.columns) >= 2 and not returns.empty:
+            if len(data.columns) >= 2 and not returns.empty:
                 st.subheader("Correlation Heatmap")
-                corr = returns.corr()
-                heatmap = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r")
+                heatmap = px.imshow(returns.corr(), text_auto=".2f", color_continuous_scale="RdBu_r")
                 heatmap.update_layout(template="plotly_dark", height=650)
                 st.plotly_chart(heatmap, use_container_width=True)
 
-            st.caption("หมายเหตุ: Risk metrics คำนวณจาก daily returns และ annualize ด้วย 252 trading days; Sharpe ในเวอร์ชันนี้ใช้ risk-free rate = 0 เพื่อดูเปรียบเทียบเบื้องต้น")
+            st.caption("Risk metrics คำนวณจาก daily returns และ annualize ด้วย 252 trading days; Sharpe ใช้ risk-free rate = 0")
+
 
 # =====================================================
-# TAB 6: MARKET ANALYSIS
+# TAB 6: WATCHLIST
+# =====================================================
+
+with tab_watchlist:
+    st.header("👀 Watchlist")
+    st.caption("รายการเฝ้าดูจาก Google Sheet แท็บ watchlist")
+
+    if watchlist.empty:
+        st.info("ยังไม่มี watchlist ให้สร้างแท็บ watchlist ใน Google Sheet โดยมีคอลัมน์ Symbol, Name, Theme, TargetPrice, Thesis")
+    else:
+        tickers = watchlist["Symbol"].tolist()
+        current_prices = get_current_prices(tickers)
+
+        watch = watchlist.copy()
+        watch["YFinanceSymbol"] = watch["Symbol"].apply(normalize_symbol_for_yfinance)
+        watch["CurrentPrice"] = watch["YFinanceSymbol"].map(current_prices)
+        watch["CurrentPrice"] = to_number(watch["CurrentPrice"])
+        watch["UpsideToTarget %"] = np.where(
+            watch["TargetPrice"] > 0,
+            (watch["TargetPrice"] / watch["CurrentPrice"] - 1) * 100,
+            0,
+        )
+        watch.loc[watch["CurrentPrice"] == 0, "UpsideToTarget %"] = 0
+
+        st.dataframe(watch.round(2), use_container_width=True, hide_index=True)
+
+        priced_watch = watch[watch["CurrentPrice"] > 0]
+        if not priced_watch.empty:
+            st.subheader("Watchlist Target Upside")
+            st.plotly_chart(
+                px.bar(priced_watch, x="Symbol", y="UpsideToTarget %", color="Theme", title="Upside to Target Price"),
+                use_container_width=True,
+            )
+
+
+
+# =====================================================
+# TAB 7: OPTIONS WAR ROOM
+# =====================================================
+
+with tab_options:
+    st.markdown("""
+    <style>
+    .option-warroom {
+        background: linear-gradient(135deg, #0b1220 0%, #111827 45%, #172033 100%);
+        border: 1px solid rgba(148,163,184,0.25);
+        border-radius: 22px;
+        padding: 22px;
+        margin-bottom: 18px;
+        box-shadow: 0 18px 40px rgba(0,0,0,0.25);
+    }
+    .option-title {
+        font-size: 34px;
+        font-weight: 800;
+        color: #f8fafc;
+        margin-bottom: 4px;
+    }
+    .option-subtitle {
+        color: #94a3b8;
+        font-size: 14px;
+    }
+    .metric-card {
+        background: rgba(15,23,42,0.92);
+        border: 1px solid rgba(148,163,184,0.22);
+        border-radius: 18px;
+        padding: 18px;
+        min-height: 105px;
+    }
+    .metric-label {
+        color: #94a3b8;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }
+    .metric-value {
+        color: #f8fafc;
+        font-size: 28px;
+        font-weight: 800;
+        margin-top: 8px;
+    }
+    .metric-good { color: #34d399; }
+    .metric-bad { color: #fb7185; }
+    .metric-warn { color: #fbbf24; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="option-warroom">
+        <div class="option-title">🧨 OPTIONS WAR ROOM</div>
+        <div class="option-subtitle">Manual options tracker / scanner dashboard. ข้อมูล options realtime ต้องต่อ API เพิ่มภายหลัง</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if options_df.empty:
+        st.info("ยังไม่มีข้อมูล options ให้สร้างแท็บ options ใน Google Sheet")
+    else:
+        opt = options_df.copy()
+        opt["ContractValue"] = opt["CurrentMark"] * opt["Contracts"] * 100
+        opt["EntryValue"] = opt["EntryPrice"] * opt["Contracts"] * 100
+        opt["PnL"] = opt["ContractValue"] - opt["EntryValue"]
+        opt["PnL%"] = np.where(opt["EntryValue"] > 0, opt["PnL"] / opt["EntryValue"] * 100, 0)
+        opt["Spread"] = opt["CurrentAsk"] - opt["CurrentBid"]
+        opt["Spread%"] = np.where(opt["CurrentMark"] > 0, opt["Spread"] / opt["CurrentMark"] * 100, 0)
+        opt["LiquidityScore"] = (
+            np.where(opt["OpenInterest"] >= 1000, 2, np.where(opt["OpenInterest"] >= 100, 1, 0))
+            + np.where(opt["Volume"] >= 1_000_000, 2, np.where(opt["Volume"] >= 100_000, 1, 0))
+            + np.where(opt["Spread%"] <= 10, 2, np.where(opt["Spread%"] <= 25, 1, 0))
+        )
+        opt["GreekHeat"] = (
+            abs(opt["Delta"]) * 2
+            + abs(opt["Gamma"]) * 10
+            + abs(opt["Theta"]) * 5
+            + abs(opt["Vega"]) * 2
+            + opt["IV"]
+        )
+        opt["StarRating"] = np.clip((opt["LiquidityScore"] + opt["GreekHeat"]) / 2, 0, 5)
+
+        total_value = opt["ContractValue"].sum()
+        total_pnl = opt["PnL"].sum()
+        open_count = len(opt[opt["Status"].astype(str).str.upper() != "CLOSED"])
+        avg_spread = opt["Spread%"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(f"""<div class="metric-card"><div class="metric-label">Contract Value</div><div class="metric-value">${total_value:,.0f}</div></div>""", unsafe_allow_html=True)
+        pnl_class = "metric-good" if total_pnl >= 0 else "metric-bad"
+        c2.markdown(f"""<div class="metric-card"><div class="metric-label">Open P/L</div><div class="metric-value {pnl_class}">${total_pnl:,.0f}</div></div>""", unsafe_allow_html=True)
+        c3.markdown(f"""<div class="metric-card"><div class="metric-label">Open Contracts</div><div class="metric-value">{open_count}</div></div>""", unsafe_allow_html=True)
+        c4.markdown(f"""<div class="metric-card"><div class="metric-label">Avg Spread</div><div class="metric-value metric-warn">{avg_spread:,.1f}%</div></div>""", unsafe_allow_html=True)
+
+        st.subheader("⚔️ Stock Screener / Contract Monitor")
+        col_put, col_call = st.columns(2)
+
+        with col_put:
+            st.markdown("### 🔴 Scan for PUT")
+            put_df = opt[opt["OptionType"].str.contains("P", na=False)].copy()
+            if put_df.empty:
+                st.info("No put setups found")
+            else:
+                show = put_df[["Underlying", "Strike", "Expiry", "Contracts", "CurrentBid", "CurrentMark", "CurrentAsk", "OpenInterest", "Volume", "Spread%", "StarRating", "PnL", "PnL%"]].sort_values("StarRating", ascending=False)
+                st.dataframe(
+                    show.round(2),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
+                        "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
+                        "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
+                    },
+                )
+
+        with col_call:
+            st.markdown("### 🟢 Scan for CALL")
+            call_df = opt[opt["OptionType"].str.contains("C", na=False)].copy()
+            if call_df.empty:
+                st.info("No call setups found")
+            else:
+                show = call_df[["Underlying", "Strike", "Expiry", "Contracts", "CurrentBid", "CurrentMark", "CurrentAsk", "OpenInterest", "Volume", "Spread%", "StarRating", "PnL", "PnL%"]].sort_values("StarRating", ascending=False)
+                st.dataframe(
+                    show.round(2),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
+                        "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
+                        "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
+                    },
+                )
+
+        st.subheader("📡 Monitor & Wish List")
+        monitor_cols = [
+            "Underlying", "OptionType", "Strike", "Expiry", "Contracts",
+            "CurrentBid", "CurrentMark", "CurrentAsk", "Spread%", "Delta", "Gamma", "Theta", "Vega", "IV",
+            "OpenInterest", "Volume", "StarRating", "PnL", "PnL%", "Status", "Note"
+        ]
+        st.dataframe(
+            opt[monitor_cols].round(3).sort_values("StarRating", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "OptionType": st.column_config.TextColumn("C/P"),
+                "CurrentBid": st.column_config.NumberColumn("Bid", format="$%.2f"),
+                "CurrentMark": st.column_config.NumberColumn("Mark", format="$%.2f"),
+                "CurrentAsk": st.column_config.NumberColumn("Ask", format="$%.2f"),
+                "Spread%": st.column_config.NumberColumn("Spread %", format="%.2f%%"),
+                "IV": st.column_config.NumberColumn("IV", format="%.2f"),
+                "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
+                "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
+                "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
+            },
+        )
+
+        st.subheader("🔥 Option Heat Map")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(
+                px.bar(opt, x="Underlying", y="StarRating", color="OptionType", title="Star Rating by Contract"),
+                use_container_width=True,
+            )
+        with c2:
+            st.plotly_chart(
+                px.scatter(
+                    opt,
+                    x="Spread%",
+                    y="OpenInterest",
+                    size="Volume",
+                    color="OptionType",
+                    hover_name="Underlying",
+                    title="Liquidity Map: Spread vs Open Interest",
+                ),
+                use_container_width=True,
+            )
+
+        st.info("โครงสร้างแท็บ options ใน Google Sheet: Underlying, OptionType, Strike, Expiry, Contracts, EntryPrice, CurrentBid, CurrentMark, CurrentAsk, Delta, Gamma, Theta, Vega, IV, Volume, OpenInterest, Status, Note")
+
+
+
+# =====================================================
+# TAB 8: MARKET ANALYSIS
 # =====================================================
 
 with tab_market:
     st.header("🔎 Market Analysis")
-    st.caption("คงแท็บนี้ไว้สำหรับต่อยอดการวิเคราะห์ตลาด")
+    st.caption("วิเคราะห์ ticker รายตัว โดยเลือกช่วงวันที่ในหน้านี้เท่านั้น")
 
     c1, c2, c3 = st.columns([2, 1, 1])
     selected_symbol = c1.text_input("Enter Symbol", value="MMYT")
-    start_date = c2.date_input("Start Date", value=datetime.now().date() - timedelta(days=365))
-    end_date = c3.date_input("End Date", value=datetime.now().date())
-
-    yf_symbol = normalize_symbol_for_yfinance(selected_symbol)
+    start_date = c2.date_input("Start Date", value=date.today() - timedelta(days=365))
+    end_date = c3.date_input("End Date", value=date.today())
 
     if selected_symbol:
-        try:
-            ticker = yf.Ticker(yf_symbol)
-            hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
-            if hist.empty:
+        yf_symbol = normalize_symbol_for_yfinance(selected_symbol)
+
+        if start_date >= end_date:
+            st.warning("กรุณาเลือกช่วงวันที่ให้ถูกต้อง")
+        else:
+            data = download_prices([yf_symbol], start=start_date, end=end_date + timedelta(days=1))
+            if data.empty:
                 st.warning("ไม่พบข้อมูลราคา")
             else:
-                st.subheader(f"Price Chart: {selected_symbol}")
-                st.line_chart(hist[["Close"]])
+                col = data.columns[0]
+                series = data[col].dropna()
 
-                last_price = hist["Close"].iloc[-1]
-                first_price = hist["Close"].iloc[0]
-                period_return = (last_price / first_price - 1) * 100
+                st.subheader(f"Price Chart: {selected_symbol}")
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=series.index, y=series, mode="lines", name=selected_symbol))
+                fig.update_layout(template="plotly_dark", height=520, hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
+
+                latest = series.iloc[-1]
+                first = series.iloc[0]
+                period_return = (latest / first - 1) * 100
+                risk_df = calculate_risk_metrics(data)
 
                 c1, c2 = st.columns(2)
-                c1.metric("Latest Price", f"{last_price:,.2f}")
+                c1.metric("Latest Price", f"{latest:,.2f}")
                 c2.metric("Selected Period Return", pct(period_return))
-        except Exception as e:
-            st.error(f"โหลดข้อมูลไม่ได้: {e}")
+
+                st.subheader("Risk Metrics")
+                st.dataframe(risk_df.round(2), use_container_width=True, hide_index=True)
