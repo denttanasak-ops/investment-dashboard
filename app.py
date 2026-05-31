@@ -238,6 +238,7 @@ WATCHLIST_COLUMNS = {
 OPTIONS_COLUMNS = {
     "Underlying": "",
     "OptionType": "",
+    "PositionSide": "SELL",
     "Strike": 0.0,
     "Expiry": "",
     "Contracts": 0.0,
@@ -253,6 +254,7 @@ OPTIONS_COLUMNS = {
     "Volume": 0.0,
     "OpenInterest": 0.0,
     "Status": "OPEN",
+    "UnderlyingPrice": 0.0,
     "Note": "",
 }
 
@@ -291,6 +293,7 @@ def fallback_options():
     return pd.DataFrame({
         "Underlying": ["HD", "BKNG", "RKLB"],
         "OptionType": ["PUT", "PUT", "CALL"],
+        "PositionSide": ["SELL", "SELL", "BUY"],
         "Strike": [320, 3800, 30],
         "Expiry": ["2026-07-17", "2026-07-17", "2026-07-17"],
         "Contracts": [1, 1, 2],
@@ -306,7 +309,8 @@ def fallback_options():
         "Volume": [7000000, 8500000, 1609],
         "OpenInterest": [1609, 32, 210],
         "Status": ["WATCH", "WATCH", "OPEN"],
-        "Note": ["ตัวอย่าง", "ตัวอย่าง", "ตัวอย่าง"],
+        "UnderlyingPrice": [370, 3950, 27],
+        "Note": ["ตัวอย่าง CSP", "ตัวอย่าง CSP", "ตัวอย่าง CALL"],
     })
 
 
@@ -550,6 +554,7 @@ def load_options():
     mappings = {
         "Underlying": ["Underlying", "Ticker", "Symbol", "Stock"],
         "OptionType": ["OptionType", "Type", "CallPut", "PutCall", "C/P"],
+        "PositionSide": ["PositionSide", "Side", "BuySell", "Buy/Sell", "Action"],
         "Strike": ["Strike", "StrikePrice", "Strike Price"],
         "Expiry": ["Expiry", "Expiration", "ExpirationDate", "Expiration Date"],
         "Contracts": ["Contracts", "Contract", "Qty", "Quantity"],
@@ -564,6 +569,7 @@ def load_options():
         "IV": ["IV", "ImpliedVolatility", "Implied Volatility"],
         "Volume": ["Volume", "Vol"],
         "OpenInterest": ["OpenInterest", "Open Interest", "OI"],
+        "UnderlyingPrice": ["UnderlyingPrice", "Underlying Price", "StockPrice", "Stock Price", "Spot"],
         "Status": ["Status"],
         "Note": ["Note", "Notes"],
     }
@@ -577,7 +583,9 @@ def load_options():
     df = ensure_columns(df, OPTIONS_COLUMNS)
     df["Underlying"] = df["Underlying"].apply(clean_ticker)
     df["OptionType"] = df["OptionType"].astype(str).str.upper().str.strip()
-    for col in ["Strike", "Contracts", "EntryPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Delta", "Gamma", "Theta", "Vega", "IV", "Volume", "OpenInterest"]:
+    df["PositionSide"] = df["PositionSide"].astype(str).str.upper().str.strip()
+    df.loc[~df["PositionSide"].isin(["BUY", "SELL", "WATCH"]), "PositionSide"] = "SELL"
+    for col in ["Strike", "Contracts", "EntryPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Delta", "Gamma", "Theta", "Vega", "IV", "Volume", "OpenInterest", "UnderlyingPrice"]:
         df[col] = to_number(df[col])
 
     df = df[df["Underlying"] != ""]
@@ -1291,6 +1299,7 @@ with tab_watchlist:
 
 
 
+
 # =====================================================
 # TAB 7: OPTIONS WAR ROOM
 # =====================================================
@@ -1299,18 +1308,21 @@ with tab_options:
     st.markdown("""
     <style>
     .option-warroom {
-        background: linear-gradient(135deg, #0b1220 0%, #111827 45%, #172033 100%);
-        border: 1px solid rgba(148,163,184,0.25);
-        border-radius: 22px;
-        padding: 22px;
+        background: radial-gradient(circle at top left, rgba(239,68,68,0.22), transparent 30%),
+                    radial-gradient(circle at top right, rgba(59,130,246,0.18), transparent 30%),
+                    linear-gradient(135deg, #020617 0%, #0f172a 45%, #111827 100%);
+        border: 1px solid rgba(148,163,184,0.28);
+        border-radius: 24px;
+        padding: 24px;
         margin-bottom: 18px;
-        box-shadow: 0 18px 40px rgba(0,0,0,0.25);
+        box-shadow: 0 20px 48px rgba(0,0,0,0.32);
     }
     .option-title {
-        font-size: 34px;
-        font-weight: 800;
+        font-size: 38px;
+        font-weight: 900;
         color: #f8fafc;
         margin-bottom: 4px;
+        letter-spacing: -0.04em;
     }
     .option-subtitle {
         color: #94a3b8;
@@ -1321,30 +1333,39 @@ with tab_options:
         border: 1px solid rgba(148,163,184,0.22);
         border-radius: 18px;
         padding: 18px;
-        min-height: 105px;
+        min-height: 108px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
     }
     .metric-label {
         color: #94a3b8;
-        font-size: 13px;
+        font-size: 12px;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.10em;
     }
     .metric-value {
         color: #f8fafc;
         font-size: 28px;
-        font-weight: 800;
+        font-weight: 850;
         margin-top: 8px;
     }
     .metric-good { color: #34d399; }
     .metric-bad { color: #fb7185; }
     .metric-warn { color: #fbbf24; }
+    .small-note {
+        color:#94a3b8;
+        font-size:13px;
+        margin-top:8px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="option-warroom">
         <div class="option-title">🧨 OPTIONS WAR ROOM</div>
-        <div class="option-subtitle">Manual options tracker / scanner dashboard. ข้อมูล options realtime ต้องต่อ API เพิ่มภายหลัง</div>
+        <div class="option-subtitle">
+            Cash Secured Put Scanner • Assignment Risk Dashboard • Contract Monitor
+            <br>ข้อมูล options ยังเป็น manual จาก Google Sheet; ถ้าต้องการ realtime bid/ask/greeks ต้องต่อ Options API ภายหลัง
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1352,12 +1373,49 @@ with tab_options:
         st.info("ยังไม่มีข้อมูล options ให้สร้างแท็บ options ใน Google Sheet")
     else:
         opt = options_df.copy()
+        opt["ExpiryDate"] = pd.to_datetime(opt["Expiry"], errors="coerce")
+        today_ts = pd.Timestamp(date.today())
+        opt["DTE"] = (opt["ExpiryDate"] - today_ts).dt.days
+        opt["DTE"] = opt["DTE"].fillna(0).clip(lower=0)
+
+        # ถ้าไม่ได้กรอก UnderlyingPrice ในชีต ให้พยายามดึงราคาหุ้นอ้างอิงจาก yfinance
+        underlying_prices = get_current_prices(opt["Underlying"].dropna().unique().tolist())
+        opt["YFinanceUnderlyingPrice"] = opt["Underlying"].map(underlying_prices)
+        opt["YFinanceUnderlyingPrice"] = to_number(opt["YFinanceUnderlyingPrice"])
+        opt["UnderlyingPrice"] = np.where(
+            opt["UnderlyingPrice"] > 0,
+            opt["UnderlyingPrice"],
+            opt["YFinanceUnderlyingPrice"],
+        )
+
+        opt["PremiumUsed"] = np.where(opt["CurrentMark"] > 0, opt["CurrentMark"], opt["CurrentBid"])
         opt["ContractValue"] = opt["CurrentMark"] * opt["Contracts"] * 100
         opt["EntryValue"] = opt["EntryPrice"] * opt["Contracts"] * 100
-        opt["PnL"] = opt["ContractValue"] - opt["EntryValue"]
+        opt["PnL"] = np.where(
+            opt["PositionSide"].eq("SELL"),
+            opt["EntryValue"] - opt["ContractValue"],
+            opt["ContractValue"] - opt["EntryValue"],
+        )
         opt["PnL%"] = np.where(opt["EntryValue"] > 0, opt["PnL"] / opt["EntryValue"] * 100, 0)
+
         opt["Spread"] = opt["CurrentAsk"] - opt["CurrentBid"]
         opt["Spread%"] = np.where(opt["CurrentMark"] > 0, opt["Spread"] / opt["CurrentMark"] * 100, 0)
+        opt["Moneyness%"] = np.where(
+            opt["UnderlyingPrice"] > 0,
+            (opt["UnderlyingPrice"] / opt["Strike"] - 1) * 100,
+            0,
+        )
+
+        opt["CapitalRequired"] = opt["Strike"] * opt["Contracts"] * 100
+        opt["PremiumIncome"] = opt["PremiumUsed"] * opt["Contracts"] * 100
+        opt["AssignmentPrice"] = opt["Strike"] - opt["PremiumUsed"]
+        opt["PremiumReturn%"] = np.where(opt["CapitalRequired"] > 0, opt["PremiumIncome"] / opt["CapitalRequired"] * 100, 0)
+        opt["AnnualizedReturn%"] = np.where(
+            opt["DTE"] > 0,
+            opt["PremiumReturn%"] * 365 / opt["DTE"],
+            0,
+        )
+
         opt["LiquidityScore"] = (
             np.where(opt["OpenInterest"] >= 1000, 2, np.where(opt["OpenInterest"] >= 100, 1, 0))
             + np.where(opt["Volume"] >= 1_000_000, 2, np.where(opt["Volume"] >= 100_000, 1, 0))
@@ -1372,74 +1430,141 @@ with tab_options:
         )
         opt["StarRating"] = np.clip((opt["LiquidityScore"] + opt["GreekHeat"]) / 2, 0, 5)
 
-        total_value = opt["ContractValue"].sum()
-        total_pnl = opt["PnL"].sum()
-        open_count = len(opt[opt["Status"].astype(str).str.upper() != "CLOSED"])
-        avg_spread = opt["Spread%"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+        open_opt = opt[opt["Status"].astype(str).str.upper() != "CLOSED"].copy()
+        short_puts = open_opt[
+            open_opt["OptionType"].str.contains("P", na=False)
+            & open_opt["PositionSide"].eq("SELL")
+        ].copy()
+
+        total_value = open_opt["ContractValue"].sum()
+        total_pnl = open_opt["PnL"].sum()
+        avg_spread = open_opt["Spread%"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+        total_assignment_capital = short_puts["CapitalRequired"].sum()
+        usd_cash_available = total_cash / get_usdthb_rate() if get_usdthb_rate() else 0
+        safety_margin = usd_cash_available - total_assignment_capital
+        safety_margin_pct = (safety_margin / total_assignment_capital * 100) if total_assignment_capital > 0 else 0
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(f"""<div class="metric-card"><div class="metric-label">Contract Value</div><div class="metric-value">${total_value:,.0f}</div></div>""", unsafe_allow_html=True)
+        c1.markdown(f"""<div class="metric-card"><div class="metric-label">Open Contract Value</div><div class="metric-value">${total_value:,.0f}</div><div class="small-note">Mark value</div></div>""", unsafe_allow_html=True)
         pnl_class = "metric-good" if total_pnl >= 0 else "metric-bad"
-        c2.markdown(f"""<div class="metric-card"><div class="metric-label">Open P/L</div><div class="metric-value {pnl_class}">${total_pnl:,.0f}</div></div>""", unsafe_allow_html=True)
-        c3.markdown(f"""<div class="metric-card"><div class="metric-label">Open Contracts</div><div class="metric-value">{open_count}</div></div>""", unsafe_allow_html=True)
-        c4.markdown(f"""<div class="metric-card"><div class="metric-label">Avg Spread</div><div class="metric-value metric-warn">{avg_spread:,.1f}%</div></div>""", unsafe_allow_html=True)
+        c2.markdown(f"""<div class="metric-card"><div class="metric-label">Open P/L</div><div class="metric-value {pnl_class}">${total_pnl:,.0f}</div><div class="small-note">Short premium adjusted</div></div>""", unsafe_allow_html=True)
+        c3.markdown(f"""<div class="metric-card"><div class="metric-label">Assignment Capital</div><div class="metric-value">${total_assignment_capital:,.0f}</div><div class="small-note">Short puts only</div></div>""", unsafe_allow_html=True)
+        margin_class = "metric-good" if safety_margin >= 0 else "metric-bad"
+        c4.markdown(f"""<div class="metric-card"><div class="metric-label">Safety Margin</div><div class="metric-value {margin_class}">${safety_margin:,.0f}</div><div class="small-note">{safety_margin_pct:,.1f}% of required capital</div></div>""", unsafe_allow_html=True)
 
-        st.subheader("⚔️ Stock Screener / Contract Monitor")
-        col_put, col_call = st.columns(2)
+        st.subheader("🛡️ Assignment Risk Dashboard")
+        if short_puts.empty:
+            st.info("ยังไม่มี Short Put สำหรับคำนวณ assignment risk")
+        else:
+            assignment_summary = short_puts[[
+                "Underlying", "Strike", "Expiry", "DTE", "Contracts", "UnderlyingPrice",
+                "PremiumUsed", "AssignmentPrice", "CapitalRequired", "PremiumIncome",
+                "PremiumReturn%", "AnnualizedReturn%", "Moneyness%", "Delta", "Status"
+            ]].sort_values("CapitalRequired", ascending=False)
 
-        with col_put:
-            st.markdown("### 🔴 Scan for PUT")
-            put_df = opt[opt["OptionType"].str.contains("P", na=False)].copy()
-            if put_df.empty:
-                st.info("No put setups found")
-            else:
-                show = put_df[["Underlying", "Strike", "Expiry", "Contracts", "CurrentBid", "CurrentMark", "CurrentAsk", "OpenInterest", "Volume", "Spread%", "StarRating", "PnL", "PnL%"]].sort_values("StarRating", ascending=False)
-                st.dataframe(
-                    show.round(2),
+            st.dataframe(
+                assignment_summary.round(2),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "PremiumUsed": st.column_config.NumberColumn("Premium", format="$%.2f"),
+                    "AssignmentPrice": st.column_config.NumberColumn("Net Assign Price", format="$%.2f"),
+                    "CapitalRequired": st.column_config.NumberColumn("Required Capital", format="$%.0f"),
+                    "PremiumIncome": st.column_config.NumberColumn("Premium Income", format="$%.0f"),
+                    "PremiumReturn%": st.column_config.NumberColumn("Return", format="%.2f%%"),
+                    "AnnualizedReturn%": st.column_config.NumberColumn("Annualized", format="%.2f%%"),
+                    "Moneyness%": st.column_config.NumberColumn("Distance to Strike", format="%.2f%%"),
+                },
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(
+                    px.bar(short_puts, x="Underlying", y="CapitalRequired", color="Status", title="Assignment Capital by Underlying"),
                     use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
-                        "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
-                        "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
-                    },
+                )
+            with c2:
+                risk_meter = pd.DataFrame({
+                    "Category": ["USD Cash Available", "Short Put Assignment Capital", "Safety Margin"],
+                    "Value": [usd_cash_available, total_assignment_capital, safety_margin],
+                })
+                st.plotly_chart(
+                    px.bar(risk_meter, x="Category", y="Value", title="Cash vs Assignment Requirement"),
+                    use_container_width=True,
                 )
 
-        with col_call:
-            st.markdown("### 🟢 Scan for CALL")
-            call_df = opt[opt["OptionType"].str.contains("C", na=False)].copy()
-            if call_df.empty:
-                st.info("No call setups found")
+            if safety_margin < 0:
+                st.error("⚠️ Overallocated: ถ้าถูก assign ทุกสัญญาพร้อมกัน เงินสด USD ไม่พอรับหุ้นทั้งหมด")
+            elif safety_margin_pct < 20:
+                st.warning("🟡 Safety margin ต่ำกว่า 20% ควรระวังการเปิด short put เพิ่ม")
             else:
-                show = call_df[["Underlying", "Strike", "Expiry", "Contracts", "CurrentBid", "CurrentMark", "CurrentAsk", "OpenInterest", "Volume", "Spread%", "StarRating", "PnL", "PnL%"]].sort_values("StarRating", ascending=False)
-                st.dataframe(
-                    show.round(2),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
-                        "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
-                        "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
-                    },
-                )
+                st.success("🟢 Assignment risk ยังอยู่ในกรอบเงินสดที่มี")
 
-        st.subheader("📡 Monitor & Wish List")
+        st.subheader("💰 Cash Secured Put Scanner")
+        scanner = opt[
+            opt["OptionType"].str.contains("P", na=False)
+            & opt["PositionSide"].isin(["SELL", "WATCH"])
+            & (opt["DTE"] > 0)
+            & (opt["PremiumUsed"] > 0)
+            & (opt["Strike"] > 0)
+        ].copy()
+
+        if scanner.empty:
+            st.info("ยังไม่มีข้อมูล PUT สำหรับ scanner")
+        else:
+            c1, c2, c3 = st.columns(3)
+            min_annual = c1.slider("ขั้นต่ำ Annualized Return (%)", 0, 100, 10)
+            max_spread = c2.slider("Spread สูงสุด (%)", 0, 100, 30)
+            min_oi = c3.number_input("Open Interest ขั้นต่ำ", min_value=0, value=0, step=10)
+
+            scanner = scanner[
+                (scanner["AnnualizedReturn%"] >= min_annual)
+                & (scanner["Spread%"] <= max_spread)
+                & (scanner["OpenInterest"] >= min_oi)
+            ].sort_values(["AnnualizedReturn%", "StarRating"], ascending=False)
+
+            show_cols = [
+                "Underlying", "Strike", "Expiry", "DTE", "UnderlyingPrice",
+                "PremiumUsed", "CurrentBid", "CurrentMark", "CurrentAsk",
+                "AssignmentPrice", "CapitalRequired", "PremiumReturn%",
+                "AnnualizedReturn%", "Moneyness%", "Delta", "IV", "OpenInterest",
+                "Volume", "Spread%", "StarRating", "Status", "Note"
+            ]
+
+            st.dataframe(
+                scanner[show_cols].round(3),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "PremiumUsed": st.column_config.NumberColumn("Premium", format="$%.2f"),
+                    "AssignmentPrice": st.column_config.NumberColumn("Net Assign Price", format="$%.2f"),
+                    "CapitalRequired": st.column_config.NumberColumn("Required Capital", format="$%.0f"),
+                    "PremiumReturn%": st.column_config.NumberColumn("Return", format="%.2f%%"),
+                    "AnnualizedReturn%": st.column_config.NumberColumn("Annualized", format="%.2f%%"),
+                    "Moneyness%": st.column_config.NumberColumn("Distance to Strike", format="%.2f%%"),
+                    "Spread%": st.column_config.NumberColumn("Spread", format="%.2f%%"),
+                    "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
+                },
+            )
+
+        st.subheader("⚔️ Contract Monitor")
         monitor_cols = [
-            "Underlying", "OptionType", "Strike", "Expiry", "Contracts",
-            "CurrentBid", "CurrentMark", "CurrentAsk", "Spread%", "Delta", "Gamma", "Theta", "Vega", "IV",
-            "OpenInterest", "Volume", "StarRating", "PnL", "PnL%", "Status", "Note"
+            "Underlying", "OptionType", "PositionSide", "Strike", "Expiry", "DTE", "Contracts",
+            "UnderlyingPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Spread%",
+            "Delta", "Gamma", "Theta", "Vega", "IV",
+            "OpenInterest", "Volume", "StarRating", "PnL", "PnL%",
+            "Status", "Note"
         ]
+
         st.dataframe(
             opt[monitor_cols].round(3).sort_values("StarRating", ascending=False),
             use_container_width=True,
             hide_index=True,
             column_config={
-                "OptionType": st.column_config.TextColumn("C/P"),
                 "CurrentBid": st.column_config.NumberColumn("Bid", format="$%.2f"),
                 "CurrentMark": st.column_config.NumberColumn("Mark", format="$%.2f"),
                 "CurrentAsk": st.column_config.NumberColumn("Ask", format="$%.2f"),
-                "Spread%": st.column_config.NumberColumn("Spread %", format="%.2f%%"),
-                "IV": st.column_config.NumberColumn("IV", format="%.2f"),
+                "Spread%": st.column_config.NumberColumn("Spread", format="%.2f%%"),
                 "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
                 "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
                 "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
@@ -1467,7 +1592,12 @@ with tab_options:
                 use_container_width=True,
             )
 
-        st.info("โครงสร้างแท็บ options ใน Google Sheet: Underlying, OptionType, Strike, Expiry, Contracts, EntryPrice, CurrentBid, CurrentMark, CurrentAsk, Delta, Gamma, Theta, Vega, IV, Volume, OpenInterest, Status, Note")
+        st.info(
+            "แท็บ options ใน Google Sheet ควรมีคอลัมน์: "
+            "Underlying, OptionType, PositionSide, Strike, Expiry, Contracts, EntryPrice, "
+            "CurrentBid, CurrentMark, CurrentAsk, Delta, Gamma, Theta, Vega, IV, Volume, "
+            "OpenInterest, UnderlyingPrice, Status, Note"
+        )
 
 
 
