@@ -38,6 +38,13 @@ DEFAULT_TARGET_VALUE = 20_000_000
 DEFAULT_MONTHLY_CONTRIBUTION = 60_000
 DEFAULT_EXPECTED_RETURN = 0.08
 
+DEFAULT_SCAN_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSLA",
+    "HD", "BKNG", "COST", "NFLX", "AMD", "MU", "CRWD", "PANW",
+    "MELI", "MMYT", "RKLB", "OKLO", "SERV", "TEM", "SYM",
+    "QQQ", "SPY", "SOXX", "XLV", "XLE", "INDA", "MCHI", "GLD"
+]
+
 DEFAULT_MARKET_ASSETS = {
     "SPY": "US Market",
     "QQQ": "US Tech / AI",
@@ -806,6 +813,250 @@ def calculate_portfolio_level_risk(portfolio_calc, period="1y"):
     return metrics, prices
 
 
+
+# =====================================================
+# OPTION CANDIDATE SCREENER
+# =====================================================
+
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def add_technical_indicators(price: pd.Series) -> pd.DataFrame:
+    df = pd.DataFrame({"Close": price.dropna()})
+    if df.empty:
+        return df
+
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
+
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["MACDSignal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACDHist"] = df["MACD"] - df["MACDSignal"]
+
+    ema8 = df["Close"].ewm(span=8, adjust=False).mean()
+    ema21 = df["Close"].ewm(span=21, adjust=False).mean()
+    df["MACDShort"] = ema8 - ema21
+    df["MACDShortSignal"] = df["MACDShort"].ewm(span=5, adjust=False).mean()
+
+    df["RSI14"] = calculate_rsi(df["Close"], 14)
+    df["High252"] = df["Close"].rolling(252, min_periods=30).max()
+    df["PctFromHigh252"] = np.where(df["High252"] > 0, (df["Close"] / df["High252"] - 1) * 100, 0)
+    return df
+
+
+@st.cache_data(ttl=1800)
+def get_yfinance_info(symbol: str) -> dict:
+    try:
+        info = yf.Ticker(normalize_symbol_for_yfinance(symbol)).info or {}
+        return {
+            "marketCap": info.get("marketCap", np.nan),
+            "forwardPE": info.get("forwardPE", np.nan),
+            "trailingEps": info.get("trailingEps", np.nan),
+            "forwardEps": info.get("forwardEps", np.nan),
+            "targetMeanPrice": info.get("targetMeanPrice", np.nan),
+            "recommendationMean": info.get("recommendationMean", np.nan),
+        }
+    except Exception:
+        return {}
+
+
+def fair_value_lite(symbol: str, current_price: float) -> dict:
+    info = get_yfinance_info(symbol)
+    target = info.get("targetMeanPrice", np.nan)
+    forward_eps = info.get("forwardEps", np.nan)
+    trailing_eps = info.get("trailingEps", np.nan)
+    eps = forward_eps if pd.notna(forward_eps) and forward_eps > 0 else trailing_eps
+
+    fair_pe = 22
+    pe_fv = eps * fair_pe if pd.notna(eps) and eps > 0 else np.nan
+
+    if pd.notna(target) and target > 0 and pd.notna(pe_fv) and pe_fv > 0:
+        fv = (target + pe_fv) / 2
+        source = "Analyst target + EPS x PE"
+    elif pd.notna(target) and target > 0:
+        fv = target
+        source = "Analyst target"
+    elif pd.notna(pe_fv) and pe_fv > 0:
+        fv = pe_fv
+        source = "EPS x PE"
+    else:
+        fv = np.nan
+        source = "N/A"
+
+    mos = (fv / current_price - 1) * 100 if pd.notna(fv) and current_price > 0 else 0
+
+    if mos >= 15:
+        fair_score = 10
+    elif mos >= 5:
+        fair_score = 7
+    elif mos >= -5:
+        fair_score = 5
+    else:
+        fair_score = 2
+
+    return {
+        "FairValue": fv,
+        "FairValueSource": source,
+        "MarginSafety%": mos,
+        "FairValueScore": fair_score,
+        "ForwardPE": info.get("forwardPE", np.nan),
+        "MarketCap": info.get("marketCap", np.nan),
+        "AnalystTarget": target,
+    }
+
+
+def analyze_trend_for_symbol(symbol: str, period: str = "2y") -> dict:
+    prices = download_prices([symbol], period=period)
+    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
+
+    if prices.empty:
+        return {}
+
+    series = prices[yf_symbol].dropna() if yf_symbol in prices.columns else prices.iloc[:, 0].dropna()
+    tech = add_technical_indicators(series)
+
+    if tech.empty or len(tech) < 60:
+        return {}
+
+    last = tech.iloc[-1]
+    prev = tech.iloc[-2] if len(tech) >= 2 else last
+
+    close = float(last["Close"])
+    rsi = float(last["RSI14"]) if pd.notna(last["RSI14"]) else np.nan
+
+    short_score = 0
+    short_score += 1 if last["Close"] > last["EMA20"] else 0
+    short_score += 1 if last["MACDShort"] > last["MACDShortSignal"] else 0
+    short_score += 1 if pd.notna(rsi) and rsi > 50 else 0
+
+    medium_score = 0
+    medium_score += 1 if last["Close"] > last["EMA50"] else 0
+    medium_score += 1 if last["EMA20"] > last["EMA50"] else 0
+    medium_score += 1 if last["MACD"] > 0 else 0
+
+    long_score = 0
+    if pd.notna(last["EMA200"]):
+        long_score += 1 if last["Close"] > last["EMA200"] else 0
+        long_score += 1 if last["EMA50"] > last["EMA200"] else 0
+    long_score += 1 if last["PctFromHigh252"] >= -15 else 0
+
+    trend_score = ((short_score / 3) * 0.20 + (medium_score / 3) * 0.30 + (long_score / 3) * 0.50) * 10
+
+    momentum_1m = (series.iloc[-1] / series.iloc[-21] - 1) * 100 if len(series) > 21 else 0
+    momentum_3m = (series.iloc[-1] / series.iloc[-63] - 1) * 100 if len(series) > 63 else 0
+    momentum_6m = (series.iloc[-1] / series.iloc[-126] - 1) * 100 if len(series) > 126 else 0
+    momentum_12m = (series.iloc[-1] / series.iloc[-252] - 1) * 100 if len(series) > 252 else 0
+
+    macd_cross_today = bool((last["MACD"] > last["MACDSignal"]) and (prev["MACD"] <= prev["MACDSignal"]))
+    signal_today = "🟢 MACD Bullish Cross" if macd_cross_today else ""
+
+    return {
+        "Symbol": clean_ticker(symbol),
+        "Price": close,
+        "EMA20": float(last["EMA20"]),
+        "EMA50": float(last["EMA50"]),
+        "EMA200": float(last["EMA200"]) if pd.notna(last["EMA200"]) else np.nan,
+        "RSI14": rsi,
+        "MACD": float(last["MACD"]),
+        "MACDSignal": float(last["MACDSignal"]),
+        "MACDHist": float(last["MACDHist"]),
+        "ShortTrend": short_score,
+        "MediumTrend": medium_score,
+        "LongTrend": long_score,
+        "TrendScore": trend_score,
+        "Momentum1M%": momentum_1m,
+        "Momentum3M%": momentum_3m,
+        "Momentum6M%": momentum_6m,
+        "Momentum12M%": momentum_12m,
+        "PctFromHigh252%": float(last["PctFromHigh252"]),
+        "SignalToday": signal_today,
+    }
+
+
+def get_candidate_universe(portfolio_calc: pd.DataFrame, watchlist: pd.DataFrame, extra_symbols: list | None = None) -> list:
+    portfolio_symbols = portfolio_calc.loc[~portfolio_calc["IsCash"], "Ticker"].dropna().astype(str).tolist()
+    watch_symbols = watchlist["Symbol"].dropna().astype(str).tolist() if not watchlist.empty else []
+    symbols = portfolio_symbols + watch_symbols + (extra_symbols or DEFAULT_SCAN_UNIVERSE)
+
+    cleaned = []
+    for s in symbols:
+        s = clean_ticker(s)
+        if not s or s in MANUAL_ONLY_TICKERS or s.endswith("80"):
+            continue
+        cleaned.append(s)
+
+    return sorted(list(dict.fromkeys(cleaned)))
+
+
+def build_option_candidate_screener(symbols: list, max_symbols: int = 80) -> pd.DataFrame:
+    rows = []
+    for symbol in symbols[:max_symbols]:
+        trend = analyze_trend_for_symbol(symbol)
+        if not trend:
+            continue
+
+        fv = fair_value_lite(symbol, trend["Price"])
+        row = {**trend, **fv}
+
+        momentum_score = 0
+        momentum_score += 2.5 if row["Momentum1M%"] > 0 else 0
+        momentum_score += 2.5 if row["Momentum3M%"] > 0 else 0
+        momentum_score += 2.5 if row["Momentum6M%"] > 0 else 0
+        momentum_score += 2.5 if row["Momentum12M%"] > 0 else 0
+        row["MomentumScore"] = momentum_score
+
+        risk_score = 10
+        if row["RSI14"] > 80:
+            risk_score -= 3
+        elif row["RSI14"] > 70:
+            risk_score -= 1.5
+        if row["PctFromHigh252%"] < -25:
+            risk_score -= 3
+        row["RiskScore"] = max(risk_score, 0)
+
+        row["TotalScore"] = (
+            row["TrendScore"] * 0.40
+            + row["FairValueScore"] * 0.30
+            + row["MomentumScore"] * 0.20
+            + row["RiskScore"] * 0.10
+        )
+
+        if row["TotalScore"] >= 9:
+            row["Conviction"] = "🟢 High"
+        elif row["TotalScore"] >= 8:
+            row["Conviction"] = "🟢 Good"
+        elif row["TotalScore"] >= 7:
+            row["Conviction"] = "🟡 Watch"
+        else:
+            row["Conviction"] = "🔴 Avoid"
+
+        if row["TrendScore"] >= 8 and row["MarginSafety%"] >= 5:
+            row["SuggestedSetup"] = "CSP"
+        elif row["TrendScore"] >= 8 and row["MarginSafety%"] < 5:
+            row["SuggestedSetup"] = "LEAPS / Wait Pullback"
+        elif row["TrendScore"] >= 7:
+            row["SuggestedSetup"] = "Watch"
+        else:
+            row["SuggestedSetup"] = "Avoid"
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).sort_values("TotalScore", ascending=False)
+
+
 # =====================================================
 # NEWS
 # =====================================================
@@ -911,13 +1162,14 @@ st.sidebar.metric("Property Equity", format_thb(property_equity))
 # TABS
 # =====================================================
 
-tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_watchlist, tab_options, tab_market = st.tabs([
+tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_watchlist, tab_auto, tab_options, tab_market = st.tabs([
     "💰 My Wealth",
     "📈 Portfolio Dashboard",
     "🎯 Retirement Plan",
     "📰 Portfolio News",
     "🌍 Macro Dashboard",
     "👀 Watchlist",
+    "⭐ Auto Watchlist",
     "🧨 Options War Room",
     "🔎 Market Analysis",
 ])
@@ -1300,8 +1552,131 @@ with tab_watchlist:
 
 
 
+
 # =====================================================
-# TAB 7: OPTIONS WAR ROOM
+# TAB 7: AUTO WATCHLIST / OPTION CANDIDATES
+# =====================================================
+
+with tab_auto:
+    st.header("⭐ Auto Watchlist / Option Candidate Screener")
+    st.caption("คัดหุ้นจาก Portfolio + Manual Watchlist + Scan Universe ด้วย Multi-Timeframe Trend, MACD, RSI และ Fair Value Lite")
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    extra_input = c1.text_input(
+        "เพิ่มหุ้นที่ต้องการสแกนเอง คั่นด้วย comma",
+        value="",
+        placeholder="เช่น HD,BKNG,META,MU"
+    )
+    max_symbols = c2.slider("จำนวนหุ้นสูงสุดที่สแกน", 10, 120, 60, step=10)
+    min_score = c3.slider("คะแนนขั้นต่ำที่แสดง", 0.0, 10.0, 7.0, step=0.5)
+
+    extra_symbols = [clean_ticker(x) for x in extra_input.split(",") if clean_ticker(x)]
+    universe = get_candidate_universe(portfolio_calc, watchlist, DEFAULT_SCAN_UNIVERSE + extra_symbols)
+
+    st.caption(f"Universe ทั้งหมด {len(universe)} ตัว | สแกนสูงสุด {max_symbols} ตัวแรก")
+
+    with st.spinner("กำลังสแกน trend / fair value / momentum จาก yfinance..."):
+        candidates = build_option_candidate_screener(universe, max_symbols=max_symbols)
+
+    if candidates.empty:
+        st.warning("ยังไม่มีข้อมูลพอสำหรับสร้าง Auto Watchlist")
+    else:
+        candidates = candidates[candidates["TotalScore"] >= min_score].copy()
+
+        if candidates.empty:
+            st.info("ไม่มีหุ้นที่ผ่านคะแนนขั้นต่ำ ลองลด min score")
+        else:
+            high = candidates[candidates["TotalScore"] >= 9]
+            good = candidates[(candidates["TotalScore"] >= 8) & (candidates["TotalScore"] < 9)]
+            signal_today = candidates[candidates["SignalToday"].astype(str).str.len() > 0]
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Candidates", len(candidates))
+            c2.metric("High Conviction", len(high))
+            c3.metric("Good", len(good))
+            c4.metric("Signal Today", len(signal_today))
+
+            st.subheader("🔥 High Conviction List")
+            high_cols = [
+                "Symbol", "TotalScore", "Conviction", "SuggestedSetup",
+                "Price", "FairValue", "MarginSafety%",
+                "TrendScore", "ShortTrend", "MediumTrend", "LongTrend",
+                "RSI14", "Momentum1M%", "Momentum3M%", "Momentum6M%", "Momentum12M%",
+                "SignalToday"
+            ]
+            st.dataframe(
+                candidates[high_cols].round(2),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "TotalScore": st.column_config.ProgressColumn("Score", min_value=0, max_value=10),
+                    "TrendScore": st.column_config.ProgressColumn("Trend", min_value=0, max_value=10),
+                    "MarginSafety%": st.column_config.NumberColumn("MOS", format="%.2f%%"),
+                    "Momentum1M%": st.column_config.NumberColumn("1M", format="%.2f%%"),
+                    "Momentum3M%": st.column_config.NumberColumn("3M", format="%.2f%%"),
+                    "Momentum6M%": st.column_config.NumberColumn("6M", format="%.2f%%"),
+                    "Momentum12M%": st.column_config.NumberColumn("12M", format="%.2f%%"),
+                },
+            )
+
+            st.subheader("📈 Multi-Timeframe Trend")
+            trend_cols = ["Symbol", "ShortTrend", "MediumTrend", "LongTrend", "TrendScore", "MACD", "MACDSignal", "MACDHist", "RSI14", "PctFromHigh252%"]
+            st.dataframe(
+                candidates[trend_cols].round(3),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "ShortTrend": st.column_config.ProgressColumn("Short 0-3", min_value=0, max_value=3),
+                    "MediumTrend": st.column_config.ProgressColumn("Medium 0-3", min_value=0, max_value=3),
+                    "LongTrend": st.column_config.ProgressColumn("Long 0-3", min_value=0, max_value=3),
+                    "TrendScore": st.column_config.ProgressColumn("Trend Score", min_value=0, max_value=10),
+                    "PctFromHigh252%": st.column_config.NumberColumn("% from 52W High", format="%.2f%%"),
+                },
+            )
+
+            st.subheader("💰 Fair Value Lite")
+            fv_cols = ["Symbol", "Price", "FairValue", "AnalystTarget", "MarginSafety%", "ForwardPE", "FairValueSource", "FairValueScore"]
+            st.dataframe(
+                candidates[fv_cols].round(2),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "MarginSafety%": st.column_config.NumberColumn("Margin of Safety", format="%.2f%%"),
+                    "FairValueScore": st.column_config.ProgressColumn("FV Score", min_value=0, max_value=10),
+                },
+            )
+
+            st.subheader("🚨 Signal Today")
+            if signal_today.empty:
+                st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
+            else:
+                st.dataframe(
+                    signal_today[["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.subheader("📊 Score Breakdown")
+            st.plotly_chart(
+                px.bar(
+                    candidates.head(20),
+                    x="Symbol",
+                    y="TotalScore",
+                    color="SuggestedSetup",
+                    title="Top 20 Option Candidate Scores",
+                ),
+                use_container_width=True,
+            )
+            score_cols = ["Symbol", "TotalScore", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
+            st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
+
+            st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
+
+
+
+
+# =====================================================
+# TAB 8: OPTIONS WAR ROOM
 # =====================================================
 
 with tab_options:
@@ -1602,7 +1977,7 @@ with tab_options:
 
 
 # =====================================================
-# TAB 8: MARKET ANALYSIS
+# TAB 9: MARKET ANALYSIS
 # =====================================================
 
 with tab_market:
