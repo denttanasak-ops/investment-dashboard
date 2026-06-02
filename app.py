@@ -1617,32 +1617,6 @@ with tab_watchlist:
     st.header("👀 Watchlist + Auto Watchlist")
     st.caption("รวมรายการเฝ้าดูจาก Google Sheet กับ Auto Watchlist ที่ระบบสแกนจาก Portfolio + Watchlist + Scan Universe")
 
-    st.subheader("📌 Manual Watchlist from Google Sheet")
-    if watchlist.empty:
-        st.info("ยังไม่มี watchlist ให้สร้างแท็บ watchlist ใน Google Sheet โดยมีคอลัมน์ Symbol, Name, Theme, TargetPrice, Thesis")
-    else:
-        tickers = watchlist["Symbol"].tolist()
-        current_prices = get_current_prices(tickers)
-
-        watch = watchlist.copy()
-        watch["YFinanceSymbol"] = watch["Symbol"].apply(normalize_symbol_for_yfinance)
-        watch["CurrentPrice"] = watch["YFinanceSymbol"].map(current_prices)
-        watch["CurrentPrice"] = to_number(watch["CurrentPrice"])
-        watch["UpsideToTarget %"] = np.where(
-            (watch["TargetPrice"] > 0) & (watch["CurrentPrice"] > 0),
-            (watch["TargetPrice"] / watch["CurrentPrice"] - 1) * 100,
-            0,
-        )
-
-        st.dataframe(watch.round(2), use_container_width=True, hide_index=True)
-
-        priced_watch = watch[(watch["CurrentPrice"] > 0) & (watch["TargetPrice"] > 0)]
-        if not priced_watch.empty:
-            st.plotly_chart(
-                px.bar(priced_watch, x="Symbol", y="UpsideToTarget %", color="Theme", title="Manual Watchlist: Upside to Target Price"),
-                use_container_width=True,
-            )
-
     st.divider()
     st.subheader("⭐ Auto Watchlist / Option Candidate Screener")
     st.caption("คัดหุ้นด้วย Multi-Timeframe Trend, MACD, RSI, Momentum และ Fair Value Lite จาก yfinance")
