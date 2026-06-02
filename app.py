@@ -42,6 +42,8 @@ DEFAULT_SCAN_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSLA",
     "HD", "BKNG", "COST", "NFLX", "AMD", "MU", "CRWD", "PANW",
     "MELI", "MMYT", "RKLB", "OKLO", "SERV", "TEM", "SYM",
+    # AI picks & shovels / Hidden-gem candidates
+    "SNPS", "CDNS", "ENTG", "COHR", "LITE", "GLW", "MRVL", "MTSI", "NVT", "VRT", "MOD",
     "QQQ", "SPY", "SOXX", "XLV", "XLE", "INDA", "MCHI", "GLD"
 ]
 
@@ -63,6 +65,48 @@ DEFAULT_MARKET_ASSETS = {
     "DX-Y.NYB": "Dollar Index",
     "^TNX": "US 10Y Yield",
     "CL=F": "Oil WTI",
+}
+
+# Market Discovery = คะแนนว่า “ตลาดยังมองไม่เห็นธีมนี้มากแค่ไหน”
+# 5 = hidden / คนทั่วไปยังไม่พูดถึง, 1 = consensus / ทุกคนรู้แล้ว
+MARKET_DISCOVERY = {
+    # Consensus AI winners
+    "NVDA": 1, "AVGO": 1, "TSM": 1, "AMD": 2, "MU": 2,
+    "SNPS": 2, "CDNS": 2,
+
+    # AI picks & shovels ที่ตลาดยังให้ค่าไม่เต็มเท่า mega-cap AI
+    "ENTG": 3,
+    "COHR": 4, "LITE": 4, "GLW": 4, "MTSI": 3, "MRVL": 3,
+    "NVT": 3, "VRT": 2, "MOD": 3,
+
+    # Broad watchlist / speculative growth
+    "RKLB": 3, "OKLO": 3, "SERV": 3, "TEM": 3, "SYM": 3,
+
+    # ETFs / broad assets ไม่ใช่ hidden-gem รายตัว
+    "SPY": 1, "QQQ": 1, "SOXX": 1, "XLV": 1, "XLE": 1, "GLD": 1,
+    "INDA": 2, "MCHI": 2, "BTC-USD": 1,
+}
+
+MARKET_DISCOVERY_NOTE = {
+    5: "Hidden / ตลาดแทบยังไม่พูดถึง",
+    4: "Early discovery / คนเริ่มรู้เฉพาะกลุ่ม",
+    3: "Emerging theme / ตลาดเริ่มถกเถียง",
+    2: "Known AI theme / นักลงทุนสาย AI รู้แล้ว",
+    1: "Consensus / ทุกคนรู้แล้ว",
+}
+
+AI_PICK_SHOVEL_THEME = {
+    "SNPS": "EDA Software",
+    "CDNS": "EDA Software",
+    "ENTG": "Semiconductor Materials",
+    "COHR": "Silicon Photonics / Optical",
+    "LITE": "Silicon Photonics / Optical",
+    "GLW": "Glass Substrate / Specialty Glass",
+    "MRVL": "Optical Interconnect / AI Networking",
+    "MTSI": "Optical / RF Components",
+    "NVT": "Data Center Power / Cooling",
+    "VRT": "Data Center Power / Cooling",
+    "MOD": "Thermal Management",
 }
 
 MANUAL_ONLY_TICKERS = {
@@ -136,6 +180,26 @@ def normalize_symbol_for_yfinance(symbol: str) -> str:
 def get_asset_name(ticker):
     ticker = clean_ticker(ticker)
     return DEFAULT_MARKET_ASSETS.get(ticker, ticker)
+
+
+def get_market_discovery(symbol):
+    symbol = clean_ticker(symbol)
+    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
+    return MARKET_DISCOVERY.get(symbol, MARKET_DISCOVERY.get(yf_symbol, 2))
+
+
+def get_discovery_note(score):
+    try:
+        score = int(score)
+    except Exception:
+        score = 2
+    return MARKET_DISCOVERY_NOTE.get(score, "Known theme")
+
+
+def get_ai_pick_shovel_theme(symbol):
+    symbol = clean_ticker(symbol)
+    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
+    return AI_PICK_SHOVEL_THEME.get(symbol, AI_PICK_SHOVEL_THEME.get(yf_symbol, ""))
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1008,6 +1072,10 @@ def build_option_candidate_screener(symbols: list, max_symbols: int = 80) -> pd.
         fv = fair_value_lite(symbol, trend["Price"])
         row = {**trend, **fv}
 
+        row["MarketDiscovery"] = get_market_discovery(symbol)
+        row["DiscoveryNote"] = get_discovery_note(row["MarketDiscovery"])
+        row["AITheme"] = get_ai_pick_shovel_theme(symbol)
+
         momentum_score = 0
         momentum_score += 2.5 if row["Momentum1M%"] > 0 else 0
         momentum_score += 2.5 if row["Momentum3M%"] > 0 else 0
@@ -1029,6 +1097,13 @@ def build_option_candidate_screener(symbols: list, max_symbols: int = 80) -> pd.
             + row["FairValueScore"] * 0.30
             + row["MomentumScore"] * 0.20
             + row["RiskScore"] * 0.10
+        )
+
+        # HiddenGemScore เน้น “หุ้นดี + เทรนด์ดี + ตลาดยังไม่ consensus”
+        # ไม่ใช้แทน TotalScore แต่ใช้เป็นเลนส์อีกชั้นในการหา AI picks & shovels
+        row["HiddenGemScore"] = (
+            row["TotalScore"] * 0.65
+            + row["MarketDiscovery"] * 2 * 0.35
         )
 
         if row["TotalScore"] >= 9:
@@ -1658,7 +1733,8 @@ with tab_watchlist:
 
             st.subheader("🔥 High Conviction List")
             high_cols = [
-                "Symbol", "TotalScore", "Conviction", "SuggestedSetup",
+                "Symbol", "TotalScore", "HiddenGemScore", "MarketDiscovery", "DiscoveryNote", "AITheme",
+                "Conviction", "SuggestedSetup",
                 "Price", "FairValue", "MarginSafety%",
                 "TrendScore", "ShortTrend", "MediumTrend", "LongTrend",
                 "RSI14", "Momentum1M%", "Momentum3M%", "Momentum6M%", "Momentum12M%",
@@ -1670,12 +1746,31 @@ with tab_watchlist:
                 hide_index=True,
                 column_config={
                     "TotalScore": st.column_config.ProgressColumn("Score", min_value=0, max_value=10),
+                    "HiddenGemScore": st.column_config.ProgressColumn("Hidden Gem", min_value=0, max_value=10),
+                    "MarketDiscovery": st.column_config.ProgressColumn("Discovery", min_value=1, max_value=5),
                     "TrendScore": st.column_config.ProgressColumn("Trend", min_value=0, max_value=10),
                     "MarginSafety%": st.column_config.NumberColumn("MOS", format="%.2f%%"),
                     "Momentum1M%": st.column_config.NumberColumn("1M", format="%.2f%%"),
                     "Momentum3M%": st.column_config.NumberColumn("3M", format="%.2f%%"),
                     "Momentum6M%": st.column_config.NumberColumn("6M", format="%.2f%%"),
                     "Momentum12M%": st.column_config.NumberColumn("12M", format="%.2f%%"),
+                },
+            )
+
+            st.subheader("💎 Hidden Gem Lens")
+            st.caption("MarketDiscovery: 5 = ตลาดยังไม่ค่อยรู้, 1 = consensus แล้ว | HiddenGemScore ผสมคะแนนเดิมกับ Discovery")
+            hidden_cols = ["Symbol", "HiddenGemScore", "TotalScore", "MarketDiscovery", "DiscoveryNote", "AITheme", "Price", "TrendScore", "MarginSafety%", "SuggestedSetup"]
+            hidden_view = candidates.sort_values(["HiddenGemScore", "TotalScore"], ascending=False)
+            st.dataframe(
+                hidden_view[hidden_cols].round(2),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "HiddenGemScore": st.column_config.ProgressColumn("Hidden Gem", min_value=0, max_value=10),
+                    "TotalScore": st.column_config.ProgressColumn("Score", min_value=0, max_value=10),
+                    "MarketDiscovery": st.column_config.ProgressColumn("Discovery", min_value=1, max_value=5),
+                    "TrendScore": st.column_config.ProgressColumn("Trend", min_value=0, max_value=10),
+                    "MarginSafety%": st.column_config.NumberColumn("MOS", format="%.2f%%"),
                 },
             )
 
@@ -1711,7 +1806,7 @@ with tab_watchlist:
                 st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
             else:
                 st.dataframe(
-                    signal_today[["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
+                    signal_today[["Symbol", "SignalToday", "TotalScore", "HiddenGemScore", "MarketDiscovery", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -1727,7 +1822,7 @@ with tab_watchlist:
                 ),
                 use_container_width=True,
             )
-            score_cols = ["Symbol", "TotalScore", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
+            score_cols = ["Symbol", "TotalScore", "HiddenGemScore", "MarketDiscovery", "DiscoveryNote", "AITheme", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
             st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
 
             st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
