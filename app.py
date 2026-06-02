@@ -31,21 +31,11 @@ SHEET_TABS = {
     "mortgage": "mortgage",
     "property_cashflow": "property_cashflow",
     "watchlist": "watchlist",
-    "options": "options",
 }
 
 DEFAULT_TARGET_VALUE = 20_000_000
 DEFAULT_MONTHLY_CONTRIBUTION = 60_000
 DEFAULT_EXPECTED_RETURN = 0.08
-
-DEFAULT_SCAN_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSLA",
-    "HD", "BKNG", "COST", "NFLX", "AMD", "MU", "CRWD", "PANW",
-    "MELI", "MMYT", "RKLB", "OKLO", "SERV", "TEM", "SYM",
-    # AI picks & shovels / Hidden-gem candidates
-    "SNPS", "CDNS", "ENTG", "COHR", "LITE", "GLW", "MRVL", "MTSI", "NVT", "VRT", "MOD",
-    "QQQ", "SPY", "SOXX", "XLV", "XLE", "INDA", "MCHI", "GLD"
-]
 
 DEFAULT_MARKET_ASSETS = {
     "SPY": "US Market",
@@ -65,48 +55,6 @@ DEFAULT_MARKET_ASSETS = {
     "DX-Y.NYB": "Dollar Index",
     "^TNX": "US 10Y Yield",
     "CL=F": "Oil WTI",
-}
-
-# Market Discovery = คะแนนว่า “ตลาดยังมองไม่เห็นธีมนี้มากแค่ไหน”
-# 5 = hidden / คนทั่วไปยังไม่พูดถึง, 1 = consensus / ทุกคนรู้แล้ว
-MARKET_DISCOVERY = {
-    # Consensus AI winners
-    "NVDA": 1, "AVGO": 1, "TSM": 1, "AMD": 2, "MU": 2,
-    "SNPS": 2, "CDNS": 2,
-
-    # AI picks & shovels ที่ตลาดยังให้ค่าไม่เต็มเท่า mega-cap AI
-    "ENTG": 3,
-    "COHR": 4, "LITE": 4, "GLW": 4, "MTSI": 3, "MRVL": 3,
-    "NVT": 3, "VRT": 2, "MOD": 3,
-
-    # Broad watchlist / speculative growth
-    "RKLB": 3, "OKLO": 3, "SERV": 3, "TEM": 3, "SYM": 3,
-
-    # ETFs / broad assets ไม่ใช่ hidden-gem รายตัว
-    "SPY": 1, "QQQ": 1, "SOXX": 1, "XLV": 1, "XLE": 1, "GLD": 1,
-    "INDA": 2, "MCHI": 2, "BTC-USD": 1,
-}
-
-MARKET_DISCOVERY_NOTE = {
-    5: "Hidden / ตลาดแทบยังไม่พูดถึง",
-    4: "Early discovery / คนเริ่มรู้เฉพาะกลุ่ม",
-    3: "Emerging theme / ตลาดเริ่มถกเถียง",
-    2: "Known AI theme / นักลงทุนสาย AI รู้แล้ว",
-    1: "Consensus / ทุกคนรู้แล้ว",
-}
-
-AI_PICK_SHOVEL_THEME = {
-    "SNPS": "EDA Software",
-    "CDNS": "EDA Software",
-    "ENTG": "Semiconductor Materials",
-    "COHR": "Silicon Photonics / Optical",
-    "LITE": "Silicon Photonics / Optical",
-    "GLW": "Glass Substrate / Specialty Glass",
-    "MRVL": "Optical Interconnect / AI Networking",
-    "MTSI": "Optical / RF Components",
-    "NVT": "Data Center Power / Cooling",
-    "VRT": "Data Center Power / Cooling",
-    "MOD": "Thermal Management",
 }
 
 MANUAL_ONLY_TICKERS = {
@@ -180,26 +128,6 @@ def normalize_symbol_for_yfinance(symbol: str) -> str:
 def get_asset_name(ticker):
     ticker = clean_ticker(ticker)
     return DEFAULT_MARKET_ASSETS.get(ticker, ticker)
-
-
-def get_market_discovery(symbol):
-    symbol = clean_ticker(symbol)
-    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
-    return MARKET_DISCOVERY.get(symbol, MARKET_DISCOVERY.get(yf_symbol, 2))
-
-
-def get_discovery_note(score):
-    try:
-        score = int(score)
-    except Exception:
-        score = 2
-    return MARKET_DISCOVERY_NOTE.get(score, "Known theme")
-
-
-def get_ai_pick_shovel_theme(symbol):
-    symbol = clean_ticker(symbol)
-    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
-    return AI_PICK_SHOVEL_THEME.get(symbol, AI_PICK_SHOVEL_THEME.get(yf_symbol, ""))
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -306,29 +234,6 @@ WATCHLIST_COLUMNS = {
     "Thesis": "",
 }
 
-OPTIONS_COLUMNS = {
-    "Underlying": "",
-    "OptionType": "",
-    "PositionSide": "SELL",
-    "Strike": 0.0,
-    "Expiry": "",
-    "Contracts": 0.0,
-    "EntryPrice": 0.0,
-    "CurrentBid": 0.0,
-    "CurrentMark": 0.0,
-    "CurrentAsk": 0.0,
-    "Delta": 0.0,
-    "Gamma": 0.0,
-    "Theta": 0.0,
-    "Vega": 0.0,
-    "IV": 0.0,
-    "Volume": 0.0,
-    "OpenInterest": 0.0,
-    "Status": "OPEN",
-    "UnderlyingPrice": 0.0,
-    "Note": "",
-}
-
 
 def fallback_portfolio():
     return pd.DataFrame(PORTFOLIO_COLUMNS, index=[])
@@ -357,31 +262,6 @@ def fallback_watchlist():
         "Theme": ["US Market", "US Tech", "Crypto", "Gold", "India", "China", "AI", "Big Tech", "Big Tech"],
         "TargetPrice": [0, 0, 0, 0, 0, 0, 0, 0, 0],
         "Thesis": ["", "", "", "", "", "", "", "", ""],
-    })
-
-
-def fallback_options():
-    return pd.DataFrame({
-        "Underlying": ["HD", "BKNG", "RKLB"],
-        "OptionType": ["PUT", "PUT", "CALL"],
-        "PositionSide": ["SELL", "SELL", "BUY"],
-        "Strike": [320, 3800, 30],
-        "Expiry": ["2026-07-17", "2026-07-17", "2026-07-17"],
-        "Contracts": [1, 1, 2],
-        "EntryPrice": [14.40, 65.00, 2.10],
-        "CurrentBid": [14.15, 60.00, 2.15],
-        "CurrentMark": [14.15, 62.50, 2.35],
-        "CurrentAsk": [16.30, 68.00, 2.55],
-        "Delta": [-0.35, -0.28, 0.42],
-        "Gamma": [0.03, 0.01, 0.06],
-        "Theta": [-0.08, -0.12, -0.04],
-        "Vega": [0.22, 0.35, 0.18],
-        "IV": [0.32, 0.41, 0.58],
-        "Volume": [7000000, 8500000, 1609],
-        "OpenInterest": [1609, 32, 210],
-        "Status": ["WATCH", "WATCH", "OPEN"],
-        "UnderlyingPrice": [370, 3950, 27],
-        "Note": ["ตัวอย่าง CSP", "ตัวอย่าง CSP", "ตัวอย่าง CALL"],
     })
 
 
@@ -616,53 +496,6 @@ def load_watchlist():
     return df
 
 
-
-def load_options():
-    raw = safe_read_tab("options", fallback_options())
-    df = normalize_columns(raw)
-
-    rename_map = {}
-    mappings = {
-        "Underlying": ["Underlying", "Ticker", "Symbol", "Stock"],
-        "OptionType": ["OptionType", "Type", "CallPut", "PutCall", "C/P"],
-        "PositionSide": ["PositionSide", "Side", "BuySell", "Buy/Sell", "Action"],
-        "Strike": ["Strike", "StrikePrice", "Strike Price"],
-        "Expiry": ["Expiry", "Expiration", "ExpirationDate", "Expiration Date"],
-        "Contracts": ["Contracts", "Contract", "Qty", "Quantity"],
-        "EntryPrice": ["EntryPrice", "Entry Price", "Entry", "Cost", "AvgCost", "Avg Cost"],
-        "CurrentBid": ["CurrentBid", "Bid"],
-        "CurrentMark": ["CurrentMark", "Mark", "Mid", "MarketPrice"],
-        "CurrentAsk": ["CurrentAsk", "Ask"],
-        "Delta": ["Delta"],
-        "Gamma": ["Gamma"],
-        "Theta": ["Theta"],
-        "Vega": ["Vega"],
-        "IV": ["IV", "ImpliedVolatility", "Implied Volatility"],
-        "Volume": ["Volume", "Vol"],
-        "OpenInterest": ["OpenInterest", "Open Interest", "OI"],
-        "UnderlyingPrice": ["UnderlyingPrice", "Underlying Price", "StockPrice", "Stock Price", "Spot"],
-        "Status": ["Status"],
-        "Note": ["Note", "Notes"],
-    }
-
-    for std_col, candidates in mappings.items():
-        found = pick_col(df, candidates)
-        if found is not None and found != std_col:
-            rename_map[found] = std_col
-    df = df.rename(columns=rename_map)
-
-    df = ensure_columns(df, OPTIONS_COLUMNS)
-    df["Underlying"] = df["Underlying"].apply(clean_ticker)
-    df["OptionType"] = df["OptionType"].astype(str).str.upper().str.strip()
-    df["PositionSide"] = df["PositionSide"].astype(str).str.upper().str.strip()
-    df.loc[~df["PositionSide"].isin(["BUY", "SELL", "WATCH"]), "PositionSide"] = "SELL"
-    for col in ["Strike", "Contracts", "EntryPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Delta", "Gamma", "Theta", "Vega", "IV", "Volume", "OpenInterest", "UnderlyingPrice"]:
-        df[col] = to_number(df[col])
-
-    df = df[df["Underlying"] != ""]
-    return df
-
-
 # =====================================================
 # CALCULATIONS
 # =====================================================
@@ -877,261 +710,6 @@ def calculate_portfolio_level_risk(portfolio_calc, period="1y"):
     return metrics, prices
 
 
-
-# =====================================================
-# OPTION CANDIDATE SCREENER
-# =====================================================
-
-def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-
-def add_technical_indicators(price: pd.Series) -> pd.DataFrame:
-    df = pd.DataFrame({"Close": price.dropna()})
-    if df.empty:
-        return df
-
-    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
-
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACDSignal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACDHist"] = df["MACD"] - df["MACDSignal"]
-
-    ema8 = df["Close"].ewm(span=8, adjust=False).mean()
-    ema21 = df["Close"].ewm(span=21, adjust=False).mean()
-    df["MACDShort"] = ema8 - ema21
-    df["MACDShortSignal"] = df["MACDShort"].ewm(span=5, adjust=False).mean()
-
-    df["RSI14"] = calculate_rsi(df["Close"], 14)
-    df["High252"] = df["Close"].rolling(252, min_periods=30).max()
-    df["PctFromHigh252"] = np.where(df["High252"] > 0, (df["Close"] / df["High252"] - 1) * 100, 0)
-    return df
-
-
-@st.cache_data(ttl=1800)
-def get_yfinance_info(symbol: str) -> dict:
-    try:
-        info = yf.Ticker(normalize_symbol_for_yfinance(symbol)).info or {}
-        return {
-            "marketCap": info.get("marketCap", np.nan),
-            "forwardPE": info.get("forwardPE", np.nan),
-            "trailingEps": info.get("trailingEps", np.nan),
-            "forwardEps": info.get("forwardEps", np.nan),
-            "targetMeanPrice": info.get("targetMeanPrice", np.nan),
-            "recommendationMean": info.get("recommendationMean", np.nan),
-        }
-    except Exception:
-        return {}
-
-
-def fair_value_lite(symbol: str, current_price: float) -> dict:
-    info = get_yfinance_info(symbol)
-    target = info.get("targetMeanPrice", np.nan)
-    forward_eps = info.get("forwardEps", np.nan)
-    trailing_eps = info.get("trailingEps", np.nan)
-    eps = forward_eps if pd.notna(forward_eps) and forward_eps > 0 else trailing_eps
-
-    fair_pe = 22
-    pe_fv = eps * fair_pe if pd.notna(eps) and eps > 0 else np.nan
-
-    if pd.notna(target) and target > 0 and pd.notna(pe_fv) and pe_fv > 0:
-        fv = (target + pe_fv) / 2
-        source = "Analyst target + EPS x PE"
-    elif pd.notna(target) and target > 0:
-        fv = target
-        source = "Analyst target"
-    elif pd.notna(pe_fv) and pe_fv > 0:
-        fv = pe_fv
-        source = "EPS x PE"
-    else:
-        fv = np.nan
-        source = "N/A"
-
-    mos = (fv / current_price - 1) * 100 if pd.notna(fv) and current_price > 0 else 0
-
-    if mos >= 15:
-        fair_score = 10
-    elif mos >= 5:
-        fair_score = 7
-    elif mos >= -5:
-        fair_score = 5
-    else:
-        fair_score = 2
-
-    return {
-        "FairValue": fv,
-        "FairValueSource": source,
-        "MarginSafety%": mos,
-        "FairValueScore": fair_score,
-        "ForwardPE": info.get("forwardPE", np.nan),
-        "MarketCap": info.get("marketCap", np.nan),
-        "AnalystTarget": target,
-    }
-
-
-def analyze_trend_for_symbol(symbol: str, period: str = "2y") -> dict:
-    prices = download_prices([symbol], period=period)
-    yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
-
-    if prices.empty:
-        return {}
-
-    series = prices[yf_symbol].dropna() if yf_symbol in prices.columns else prices.iloc[:, 0].dropna()
-    tech = add_technical_indicators(series)
-
-    if tech.empty or len(tech) < 60:
-        return {}
-
-    last = tech.iloc[-1]
-    prev = tech.iloc[-2] if len(tech) >= 2 else last
-
-    close = float(last["Close"])
-    rsi = float(last["RSI14"]) if pd.notna(last["RSI14"]) else np.nan
-
-    short_score = 0
-    short_score += 1 if last["Close"] > last["EMA20"] else 0
-    short_score += 1 if last["MACDShort"] > last["MACDShortSignal"] else 0
-    short_score += 1 if pd.notna(rsi) and rsi > 50 else 0
-
-    medium_score = 0
-    medium_score += 1 if last["Close"] > last["EMA50"] else 0
-    medium_score += 1 if last["EMA20"] > last["EMA50"] else 0
-    medium_score += 1 if last["MACD"] > 0 else 0
-
-    long_score = 0
-    if pd.notna(last["EMA200"]):
-        long_score += 1 if last["Close"] > last["EMA200"] else 0
-        long_score += 1 if last["EMA50"] > last["EMA200"] else 0
-    long_score += 1 if last["PctFromHigh252"] >= -15 else 0
-
-    trend_score = ((short_score / 3) * 0.20 + (medium_score / 3) * 0.30 + (long_score / 3) * 0.50) * 10
-
-    momentum_1m = (series.iloc[-1] / series.iloc[-21] - 1) * 100 if len(series) > 21 else 0
-    momentum_3m = (series.iloc[-1] / series.iloc[-63] - 1) * 100 if len(series) > 63 else 0
-    momentum_6m = (series.iloc[-1] / series.iloc[-126] - 1) * 100 if len(series) > 126 else 0
-    momentum_12m = (series.iloc[-1] / series.iloc[-252] - 1) * 100 if len(series) > 252 else 0
-
-    macd_cross_today = bool((last["MACD"] > last["MACDSignal"]) and (prev["MACD"] <= prev["MACDSignal"]))
-    signal_today = "🟢 MACD Bullish Cross" if macd_cross_today else ""
-
-    return {
-        "Symbol": clean_ticker(symbol),
-        "Price": close,
-        "EMA20": float(last["EMA20"]),
-        "EMA50": float(last["EMA50"]),
-        "EMA200": float(last["EMA200"]) if pd.notna(last["EMA200"]) else np.nan,
-        "RSI14": rsi,
-        "MACD": float(last["MACD"]),
-        "MACDSignal": float(last["MACDSignal"]),
-        "MACDHist": float(last["MACDHist"]),
-        "ShortTrend": short_score,
-        "MediumTrend": medium_score,
-        "LongTrend": long_score,
-        "TrendScore": trend_score,
-        "Momentum1M%": momentum_1m,
-        "Momentum3M%": momentum_3m,
-        "Momentum6M%": momentum_6m,
-        "Momentum12M%": momentum_12m,
-        "PctFromHigh252%": float(last["PctFromHigh252"]),
-        "SignalToday": signal_today,
-    }
-
-
-def get_candidate_universe(portfolio_calc: pd.DataFrame, watchlist: pd.DataFrame, extra_symbols: list | None = None) -> list:
-    portfolio_symbols = portfolio_calc.loc[~portfolio_calc["IsCash"], "Ticker"].dropna().astype(str).tolist()
-    watch_symbols = watchlist["Symbol"].dropna().astype(str).tolist() if not watchlist.empty else []
-    symbols = portfolio_symbols + watch_symbols + (extra_symbols or DEFAULT_SCAN_UNIVERSE)
-
-    cleaned = []
-    for s in symbols:
-        s = clean_ticker(s)
-        if not s or s in MANUAL_ONLY_TICKERS or s.endswith("80"):
-            continue
-        cleaned.append(s)
-
-    return sorted(list(dict.fromkeys(cleaned)))
-
-
-def build_option_candidate_screener(symbols: list, max_symbols: int = 80) -> pd.DataFrame:
-    rows = []
-    for symbol in symbols[:max_symbols]:
-        trend = analyze_trend_for_symbol(symbol)
-        if not trend:
-            continue
-
-        fv = fair_value_lite(symbol, trend["Price"])
-        row = {**trend, **fv}
-
-        row["MarketDiscovery"] = get_market_discovery(symbol)
-        row["DiscoveryNote"] = get_discovery_note(row["MarketDiscovery"])
-        row["AITheme"] = get_ai_pick_shovel_theme(symbol)
-
-        momentum_score = 0
-        momentum_score += 2.5 if row["Momentum1M%"] > 0 else 0
-        momentum_score += 2.5 if row["Momentum3M%"] > 0 else 0
-        momentum_score += 2.5 if row["Momentum6M%"] > 0 else 0
-        momentum_score += 2.5 if row["Momentum12M%"] > 0 else 0
-        row["MomentumScore"] = momentum_score
-
-        risk_score = 10
-        if row["RSI14"] > 80:
-            risk_score -= 3
-        elif row["RSI14"] > 70:
-            risk_score -= 1.5
-        if row["PctFromHigh252%"] < -25:
-            risk_score -= 3
-        row["RiskScore"] = max(risk_score, 0)
-
-        row["TotalScore"] = (
-            row["TrendScore"] * 0.40
-            + row["FairValueScore"] * 0.30
-            + row["MomentumScore"] * 0.20
-            + row["RiskScore"] * 0.10
-        )
-
-        # HiddenGemScore เน้น “หุ้นดี + เทรนด์ดี + ตลาดยังไม่ consensus”
-        # ไม่ใช้แทน TotalScore แต่ใช้เป็นเลนส์อีกชั้นในการหา AI picks & shovels
-        row["HiddenGemScore"] = (
-            row["TotalScore"] * 0.65
-            + row["MarketDiscovery"] * 2 * 0.35
-        )
-
-        if row["TotalScore"] >= 9:
-            row["Conviction"] = "🟢 High"
-        elif row["TotalScore"] >= 8:
-            row["Conviction"] = "🟢 Good"
-        elif row["TotalScore"] >= 7:
-            row["Conviction"] = "🟡 Watch"
-        else:
-            row["Conviction"] = "🔴 Avoid"
-
-        if row["TrendScore"] >= 8 and row["MarginSafety%"] >= 5:
-            row["SuggestedSetup"] = "CSP"
-        elif row["TrendScore"] >= 8 and row["MarginSafety%"] < 5:
-            row["SuggestedSetup"] = "LEAPS / Wait Pullback"
-        elif row["TrendScore"] >= 7:
-            row["SuggestedSetup"] = "Watch"
-        else:
-            row["SuggestedSetup"] = "Avoid"
-
-        rows.append(row)
-
-    if not rows:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows).sort_values("TotalScore", ascending=False)
-
-
 # =====================================================
 # NEWS
 # =====================================================
@@ -1193,141 +771,6 @@ def build_news_query(symbol: str, name: str = "") -> str:
     return f"{symbol} stock"
 
 
-def get_direct_news_watchlist(symbols: list, watchlist_df: pd.DataFrame, max_symbols: int = 25, max_items: int = 3) -> pd.DataFrame:
-    name_map = {}
-    theme_map = {}
-    if watchlist_df is not None and not watchlist_df.empty:
-        for _, row in watchlist_df.iterrows():
-            s = clean_ticker(row.get("Symbol", ""))
-            if s:
-                name_map[s] = str(row.get("Name", "")).strip()
-                theme_map[s] = str(row.get("Theme", "")).strip()
-
-    rows = []
-    for symbol in symbols[:max_symbols]:
-        symbol = clean_ticker(symbol)
-        if not symbol or symbol in MANUAL_ONLY_TICKERS or symbol.endswith("80"):
-            continue
-
-        name = name_map.get(symbol, "")
-        theme = theme_map.get(symbol, "")
-        query = build_news_query(symbol, name)
-        items = fetch_google_news_rss(query, max_items=max_items)
-
-        headlines = " | ".join([item.get("title", "") for item in items])
-        sources = ", ".join(sorted(list({item.get("source", "") for item in items if item.get("source", "")})))
-        latest_time = items[0].get("published", "") if items else ""
-        news_count = len(items)
-
-        if news_count >= 3:
-            heat = "🔥 Hot"
-            score = 3
-        elif news_count == 2:
-            heat = "🟡 Active"
-            score = 2
-        elif news_count == 1:
-            heat = "🔵 Watch"
-            score = 1
-        else:
-            heat = "⚪ Quiet"
-            score = 0
-
-        rows.append({
-            "Symbol": symbol,
-            "Name": name,
-            "Theme": theme,
-            "NewsType": "Direct",
-            "NewsHeat": heat,
-            "NewsScore": score,
-            "LatestTime": latest_time,
-            "Sources": sources,
-            "Headlines": headlines,
-            "SearchQuery": query,
-        })
-
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["NewsScore", "Symbol"], ascending=[False, True])
-
-
-def get_indirect_news_watchlist(max_items: int = 3) -> pd.DataFrame:
-    macro_themes = [
-        {
-            "MacroTheme": "US-Iran / Middle East conflict",
-            "SearchQuery": "US Iran conflict oil prices gold market stocks",
-            "AffectedAssets": "Oil, XLE, XOM, CVX, GLD, Defense/ITA, BTC",
-            "Reason": "ความเสี่ยงภูมิรัฐศาสตร์มักกระทบน้ำมัน ทอง หุ้นพลังงาน หุ้นกลาโหม และสินทรัพย์เสี่ยง",
-        },
-        {
-            "MacroTheme": "Fed rate / US yields",
-            "SearchQuery": "Federal Reserve rate cut Treasury yield Nasdaq gold",
-            "AffectedAssets": "QQQ, SPY, GLD, BTC, Banks, TLT",
-            "Reason": "ดอกเบี้ยและ bond yield กระทบ valuation หุ้น growth, ทอง, Bitcoin และธนาคาร",
-        },
-        {
-            "MacroTheme": "AI chip cycle",
-            "SearchQuery": "AI chip demand Nvidia AMD semiconductor stocks",
-            "AffectedAssets": "NVDA, AMD, AVGO, SOXX, TSM",
-            "Reason": "ข่าวชิป AI ส่งผลต่อหุ้น semiconductor และหุ้นที่อยู่ใน supply chain",
-        },
-        {
-            "MacroTheme": "China stimulus / China economy",
-            "SearchQuery": "China stimulus economy stocks ETF",
-            "AffectedAssets": "MCHI, BABA, JD, Emerging Markets, Commodities",
-            "Reason": "นโยบายจีนกระทบหุ้นจีน ตลาดเกิดใหม่ และสินค้าโภคภัณฑ์",
-        },
-        {
-            "MacroTheme": "India growth / travel",
-            "SearchQuery": "India economy travel demand MakeMyTrip stock",
-            "AffectedAssets": "INDA, MMYT, India consumer/travel",
-            "Reason": "เศรษฐกิจและการเดินทางในอินเดียกระทบหุ้นธีม India growth",
-        },
-        {
-            "MacroTheme": "Crypto regulation / Bitcoin ETF flow",
-            "SearchQuery": "Bitcoin ETF inflow crypto regulation market",
-            "AffectedAssets": "BTC-USD, COIN, Crypto-related stocks",
-            "Reason": "เงินไหลเข้า ETF และกฎเกณฑ์คริปโตกระทบ Bitcoin และหุ้นเกี่ยวข้อง",
-        },
-    ]
-
-    rows = []
-    for theme in macro_themes:
-        items = fetch_google_news_rss(theme["SearchQuery"], max_items=max_items)
-        headlines = " | ".join([item.get("title", "") for item in items])
-        sources = ", ".join(sorted(list({item.get("source", "") for item in items if item.get("source", "")})))
-        latest_time = items[0].get("published", "") if items else ""
-        news_count = len(items)
-
-        if news_count >= 3:
-            heat = "🔥 Hot"
-            score = 3
-        elif news_count == 2:
-            heat = "🟡 Active"
-            score = 2
-        elif news_count == 1:
-            heat = "🔵 Watch"
-            score = 1
-        else:
-            heat = "⚪ Quiet"
-            score = 0
-
-        rows.append({
-            "MacroTheme": theme["MacroTheme"],
-            "NewsType": "Indirect",
-            "NewsHeat": heat,
-            "NewsScore": score,
-            "AffectedAssets": theme["AffectedAssets"],
-            "Reason": theme["Reason"],
-            "LatestTime": latest_time,
-            "Sources": sources,
-            "Headlines": headlines,
-            "SearchQuery": theme["SearchQuery"],
-        })
-
-    return pd.DataFrame(rows).sort_values(["NewsScore", "MacroTheme"], ascending=[False, True])
-
-
-
 # =====================================================
 # LOAD ALL DATA ONCE
 # =====================================================
@@ -1338,7 +781,6 @@ properties = load_properties()
 mortgage = load_mortgage()
 cashflow = load_property_cashflow()
 watchlist = load_watchlist()
-options_df = load_options()
 
 portfolio_calc = calculate_portfolio(portfolio_raw)
 portfolio_stats = get_portfolio_stats(portfolio_calc)
@@ -1372,13 +814,13 @@ st.sidebar.metric("Property Equity", format_thb(property_equity))
 # TABS
 # =====================================================
 
-tab_wealth, tab_portfolio, tab_news, tab_macro, tab_watchlist, tab_options, tab_market = st.tabs([
+tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_watchlist, tab_market = st.tabs([
     "💰 My Wealth",
     "📈 Portfolio Dashboard",
+    "🎯 Retirement Plan",
     "📰 Portfolio News",
     "🌍 Macro Dashboard",
     "👀 Watchlist",
-    "🧨 Options War Room",
     "🔎 Market Analysis",
 ])
 
@@ -1506,7 +948,46 @@ with tab_portfolio:
 
 
 # =====================================================
-# TAB 3: PORTFOLIO NEWS
+# TAB 3: RETIREMENT PLAN
+# =====================================================
+
+with tab_retirement:
+    st.header("🎯 Retirement Plan")
+
+    c1, c2, c3 = st.columns(3)
+    target_value = c1.number_input("Target Value", min_value=0, value=DEFAULT_TARGET_VALUE, step=100_000)
+    monthly_contribution = c2.number_input("Monthly Contribution", min_value=0, value=DEFAULT_MONTHLY_CONTRIBUTION, step=5_000)
+    expected_return = c3.number_input("Expected Return / Year (%)", min_value=0.0, max_value=30.0, value=DEFAULT_EXPECTED_RETURN * 100, step=0.5) / 100
+
+    progress = min(net_worth / target_value, 1) if target_value > 0 else 0
+    months_needed, projected_value = calculate_goal_projection(net_worth, monthly_contribution, target_value, expected_return)
+    years_needed = months_needed / 12
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Current Net Worth", format_thb(net_worth))
+    c2.metric("Target", format_thb(target_value))
+    c3.metric("Progress", pct(progress * 100))
+    c4.metric("Estimated Time", f"{years_needed:.1f} years")
+
+    st.progress(progress)
+
+    projection_rows = []
+    value = net_worth
+    monthly_rate = expected_return / 12
+
+    for month in range(0, 121):
+        if month > 0:
+            value = value * (1 + monthly_rate) + monthly_contribution
+        if month % 12 == 0:
+            projection_rows.append({"Year": month // 12, "Projected Value": value})
+
+    projection_df = pd.DataFrame(projection_rows)
+    st.line_chart(projection_df.set_index("Year"))
+    st.dataframe(projection_df, use_container_width=True, hide_index=True)
+
+
+# =====================================================
+# TAB 4: PORTFOLIO NEWS
 # =====================================================
 
 with tab_news:
@@ -1578,7 +1059,7 @@ with tab_news:
 
 
 # =====================================================
-# TAB 4: MACRO DASHBOARD
+# TAB 5: MACRO DASHBOARD
 # =====================================================
 
 with tab_macro:
@@ -1683,451 +1164,40 @@ with tab_macro:
             st.caption("Risk metrics คำนวณจาก daily returns และ annualize ด้วย 252 trading days; Sharpe ใช้ risk-free rate = 0")
 
 
-
 # =====================================================
-# TAB 5: WATCHLIST + AUTO WATCHLIST
+# TAB 6: WATCHLIST
 # =====================================================
 
 with tab_watchlist:
-    st.header("👀 Watchlist + Auto Watchlist")
-    st.caption("รวมรายการเฝ้าดูจาก Google Sheet กับ Auto Watchlist ที่ระบบสแกนจาก Portfolio + Watchlist + Scan Universe")
+    st.header("👀 Watchlist")
+    st.caption("รายการเฝ้าดูจาก Google Sheet แท็บ watchlist")
 
-    st.divider()
-    st.subheader("⭐ Auto Watchlist / Option Candidate Screener")
-    st.caption("คัดหุ้นด้วย Multi-Timeframe Trend, MACD, RSI, Momentum และ Fair Value Lite จาก yfinance")
-
-    c1, c2, c3 = st.columns([2, 1, 1])
-    extra_input = c1.text_input(
-        "เพิ่มหุ้นที่ต้องการสแกนเอง คั่นด้วย comma",
-        value="",
-        placeholder="เช่น HD,BKNG,META,MU"
-    )
-    max_symbols = c2.slider("จำนวนหุ้นสูงสุดที่สแกน", 10, 120, 60, step=10)
-    min_score = c3.slider("คะแนนขั้นต่ำที่แสดง", 0.0, 10.0, 7.0, step=0.5)
-
-    extra_symbols = [clean_ticker(x) for x in extra_input.split(",") if clean_ticker(x)]
-    universe = get_candidate_universe(portfolio_calc, watchlist, DEFAULT_SCAN_UNIVERSE + extra_symbols)
-
-    st.caption(f"Universe ทั้งหมด {len(universe)} ตัว | สแกนสูงสุด {max_symbols} ตัวแรก")
-
-    with st.spinner("กำลังสแกน trend / fair value / momentum จาก yfinance..."):
-        candidates = build_option_candidate_screener(universe, max_symbols=max_symbols)
-
-    if candidates.empty:
-        st.warning("ยังไม่มีข้อมูลพอสำหรับสร้าง Auto Watchlist")
+    if watchlist.empty:
+        st.info("ยังไม่มี watchlist ให้สร้างแท็บ watchlist ใน Google Sheet โดยมีคอลัมน์ Symbol, Name, Theme, TargetPrice, Thesis")
     else:
-        candidates = candidates[candidates["TotalScore"] >= min_score].copy()
+        tickers = watchlist["Symbol"].tolist()
+        current_prices = get_current_prices(tickers)
 
-        if candidates.empty:
-            st.info("ไม่มีหุ้นที่ผ่านคะแนนขั้นต่ำ ลองลด min score")
-        else:
-            high = candidates[candidates["TotalScore"] >= 9]
-            good = candidates[(candidates["TotalScore"] >= 8) & (candidates["TotalScore"] < 9)]
-            signal_today = candidates[candidates["SignalToday"].astype(str).str.len() > 0]
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Candidates", len(candidates))
-            c2.metric("High Conviction", len(high))
-            c3.metric("Good", len(good))
-            c4.metric("Signal Today", len(signal_today))
-
-            st.subheader("🔥 High Conviction List")
-            high_cols = [
-                "Symbol", "TotalScore", "HiddenGemScore", "MarketDiscovery", "DiscoveryNote", "AITheme",
-                "Conviction", "SuggestedSetup",
-                "Price", "FairValue", "MarginSafety%",
-                "TrendScore", "ShortTrend", "MediumTrend", "LongTrend",
-                "RSI14", "Momentum1M%", "Momentum3M%", "Momentum6M%", "Momentum12M%",
-                "SignalToday"
-            ]
-            st.dataframe(
-                candidates[high_cols].round(2),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "TotalScore": st.column_config.ProgressColumn("Score", min_value=0, max_value=10),
-                    "HiddenGemScore": st.column_config.ProgressColumn("Hidden Gem", min_value=0, max_value=10),
-                    "MarketDiscovery": st.column_config.ProgressColumn("Discovery", min_value=1, max_value=5),
-                    "TrendScore": st.column_config.ProgressColumn("Trend", min_value=0, max_value=10),
-                    "MarginSafety%": st.column_config.NumberColumn("MOS", format="%.2f%%"),
-                    "Momentum1M%": st.column_config.NumberColumn("1M", format="%.2f%%"),
-                    "Momentum3M%": st.column_config.NumberColumn("3M", format="%.2f%%"),
-                    "Momentum6M%": st.column_config.NumberColumn("6M", format="%.2f%%"),
-                    "Momentum12M%": st.column_config.NumberColumn("12M", format="%.2f%%"),
-                },
-            )
-
-            st.subheader("💎 Hidden Gem Lens")
-            st.caption("MarketDiscovery: 5 = ตลาดยังไม่ค่อยรู้, 1 = consensus แล้ว | HiddenGemScore ผสมคะแนนเดิมกับ Discovery")
-            hidden_cols = ["Symbol", "HiddenGemScore", "TotalScore", "MarketDiscovery", "DiscoveryNote", "AITheme", "Price", "TrendScore", "MarginSafety%", "SuggestedSetup"]
-            hidden_view = candidates.sort_values(["HiddenGemScore", "TotalScore"], ascending=False)
-            st.dataframe(
-                hidden_view[hidden_cols].round(2),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "HiddenGemScore": st.column_config.ProgressColumn("Hidden Gem", min_value=0, max_value=10),
-                    "TotalScore": st.column_config.ProgressColumn("Score", min_value=0, max_value=10),
-                    "MarketDiscovery": st.column_config.ProgressColumn("Discovery", min_value=1, max_value=5),
-                    "TrendScore": st.column_config.ProgressColumn("Trend", min_value=0, max_value=10),
-                    "MarginSafety%": st.column_config.NumberColumn("MOS", format="%.2f%%"),
-                },
-            )
-
-            st.subheader("📈 Multi-Timeframe Trend")
-            trend_cols = ["Symbol", "ShortTrend", "MediumTrend", "LongTrend", "TrendScore", "MACD", "MACDSignal", "MACDHist", "RSI14", "PctFromHigh252%"]
-            st.dataframe(
-                candidates[trend_cols].round(3),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "ShortTrend": st.column_config.ProgressColumn("Short 0-3", min_value=0, max_value=3),
-                    "MediumTrend": st.column_config.ProgressColumn("Medium 0-3", min_value=0, max_value=3),
-                    "LongTrend": st.column_config.ProgressColumn("Long 0-3", min_value=0, max_value=3),
-                    "TrendScore": st.column_config.ProgressColumn("Trend Score", min_value=0, max_value=10),
-                    "PctFromHigh252%": st.column_config.NumberColumn("% from 52W High", format="%.2f%%"),
-                },
-            )
-
-            st.subheader("💰 Fair Value Lite")
-            fv_cols = ["Symbol", "Price", "FairValue", "AnalystTarget", "MarginSafety%", "ForwardPE", "FairValueSource", "FairValueScore"]
-            st.dataframe(
-                candidates[fv_cols].round(2),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "MarginSafety%": st.column_config.NumberColumn("Margin of Safety", format="%.2f%%"),
-                    "FairValueScore": st.column_config.ProgressColumn("FV Score", min_value=0, max_value=10),
-                },
-            )
-
-            st.subheader("🚨 Signal Today")
-            if signal_today.empty:
-                st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
-            else:
-                st.dataframe(
-                    signal_today[["Symbol", "SignalToday", "TotalScore", "HiddenGemScore", "MarketDiscovery", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            st.subheader("📊 Score Breakdown")
-            st.plotly_chart(
-                px.bar(
-                    candidates.head(20),
-                    x="Symbol",
-                    y="TotalScore",
-                    color="SuggestedSetup",
-                    title="Top 20 Option Candidate Scores",
-                ),
-                use_container_width=True,
-            )
-            score_cols = ["Symbol", "TotalScore", "HiddenGemScore", "MarketDiscovery", "DiscoveryNote", "AITheme", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
-            st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
-
-            st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
-
-
-
-# =====================================================
-# TAB 6: OPTIONS WAR ROOM
-# =====================================================
-
-with tab_options:
-    st.markdown("""
-    <style>
-    .option-warroom {
-        background: radial-gradient(circle at top left, rgba(239,68,68,0.22), transparent 30%),
-                    radial-gradient(circle at top right, rgba(59,130,246,0.18), transparent 30%),
-                    linear-gradient(135deg, #020617 0%, #0f172a 45%, #111827 100%);
-        border: 1px solid rgba(148,163,184,0.28);
-        border-radius: 24px;
-        padding: 24px;
-        margin-bottom: 18px;
-        box-shadow: 0 20px 48px rgba(0,0,0,0.32);
-    }
-    .option-title {
-        font-size: 38px;
-        font-weight: 900;
-        color: #f8fafc;
-        margin-bottom: 4px;
-        letter-spacing: -0.04em;
-    }
-    .option-subtitle {
-        color: #94a3b8;
-        font-size: 14px;
-    }
-    .metric-card {
-        background: rgba(15,23,42,0.92);
-        border: 1px solid rgba(148,163,184,0.22);
-        border-radius: 18px;
-        padding: 18px;
-        min-height: 108px;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-    }
-    .metric-label {
-        color: #94a3b8;
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.10em;
-    }
-    .metric-value {
-        color: #f8fafc;
-        font-size: 28px;
-        font-weight: 850;
-        margin-top: 8px;
-    }
-    .metric-good { color: #34d399; }
-    .metric-bad { color: #fb7185; }
-    .metric-warn { color: #fbbf24; }
-    .small-note {
-        color:#94a3b8;
-        font-size:13px;
-        margin-top:8px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="option-warroom">
-        <div class="option-title">🧨 OPTIONS WAR ROOM</div>
-        <div class="option-subtitle">
-            Cash Secured Put Scanner • Assignment Risk Dashboard • Contract Monitor
-            <br>ข้อมูล options ยังเป็น manual จาก Google Sheet; ถ้าต้องการ realtime bid/ask/greeks ต้องต่อ Options API ภายหลัง
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if options_df.empty:
-        st.info("ยังไม่มีข้อมูล options ให้สร้างแท็บ options ใน Google Sheet")
-    else:
-        opt = options_df.copy()
-        opt["ExpiryDate"] = pd.to_datetime(opt["Expiry"], errors="coerce")
-        today_ts = pd.Timestamp(date.today())
-        opt["DTE"] = (opt["ExpiryDate"] - today_ts).dt.days
-        opt["DTE"] = opt["DTE"].fillna(0).clip(lower=0)
-
-        # ถ้าไม่ได้กรอก UnderlyingPrice ในชีต ให้พยายามดึงราคาหุ้นอ้างอิงจาก yfinance
-        underlying_prices = get_current_prices(opt["Underlying"].dropna().unique().tolist())
-        opt["YFinanceUnderlyingPrice"] = opt["Underlying"].map(underlying_prices)
-        opt["YFinanceUnderlyingPrice"] = to_number(opt["YFinanceUnderlyingPrice"])
-        opt["UnderlyingPrice"] = np.where(
-            opt["UnderlyingPrice"] > 0,
-            opt["UnderlyingPrice"],
-            opt["YFinanceUnderlyingPrice"],
-        )
-
-        opt["PremiumUsed"] = np.where(opt["CurrentMark"] > 0, opt["CurrentMark"], opt["CurrentBid"])
-        opt["ContractValue"] = opt["CurrentMark"] * opt["Contracts"] * 100
-        opt["EntryValue"] = opt["EntryPrice"] * opt["Contracts"] * 100
-        opt["PnL"] = np.where(
-            opt["PositionSide"].eq("SELL"),
-            opt["EntryValue"] - opt["ContractValue"],
-            opt["ContractValue"] - opt["EntryValue"],
-        )
-        opt["PnL%"] = np.where(opt["EntryValue"] > 0, opt["PnL"] / opt["EntryValue"] * 100, 0)
-
-        opt["Spread"] = opt["CurrentAsk"] - opt["CurrentBid"]
-        opt["Spread%"] = np.where(opt["CurrentMark"] > 0, opt["Spread"] / opt["CurrentMark"] * 100, 0)
-        opt["Moneyness%"] = np.where(
-            opt["UnderlyingPrice"] > 0,
-            (opt["UnderlyingPrice"] / opt["Strike"] - 1) * 100,
+        watch = watchlist.copy()
+        watch["YFinanceSymbol"] = watch["Symbol"].apply(normalize_symbol_for_yfinance)
+        watch["CurrentPrice"] = watch["YFinanceSymbol"].map(current_prices)
+        watch["CurrentPrice"] = to_number(watch["CurrentPrice"])
+        watch["UpsideToTarget %"] = np.where(
+            watch["TargetPrice"] > 0,
+            (watch["TargetPrice"] / watch["CurrentPrice"] - 1) * 100,
             0,
         )
+        watch.loc[watch["CurrentPrice"] == 0, "UpsideToTarget %"] = 0
 
-        opt["CapitalRequired"] = opt["Strike"] * opt["Contracts"] * 100
-        opt["PremiumIncome"] = opt["PremiumUsed"] * opt["Contracts"] * 100
-        opt["AssignmentPrice"] = opt["Strike"] - opt["PremiumUsed"]
-        opt["PremiumReturn%"] = np.where(opt["CapitalRequired"] > 0, opt["PremiumIncome"] / opt["CapitalRequired"] * 100, 0)
-        opt["AnnualizedReturn%"] = np.where(
-            opt["DTE"] > 0,
-            opt["PremiumReturn%"] * 365 / opt["DTE"],
-            0,
-        )
+        st.dataframe(watch.round(2), use_container_width=True, hide_index=True)
 
-        opt["LiquidityScore"] = (
-            np.where(opt["OpenInterest"] >= 1000, 2, np.where(opt["OpenInterest"] >= 100, 1, 0))
-            + np.where(opt["Volume"] >= 1_000_000, 2, np.where(opt["Volume"] >= 100_000, 1, 0))
-            + np.where(opt["Spread%"] <= 10, 2, np.where(opt["Spread%"] <= 25, 1, 0))
-        )
-        opt["GreekHeat"] = (
-            abs(opt["Delta"]) * 2
-            + abs(opt["Gamma"]) * 10
-            + abs(opt["Theta"]) * 5
-            + abs(opt["Vega"]) * 2
-            + opt["IV"]
-        )
-        opt["StarRating"] = np.clip((opt["LiquidityScore"] + opt["GreekHeat"]) / 2, 0, 5)
-
-        open_opt = opt[opt["Status"].astype(str).str.upper() != "CLOSED"].copy()
-        short_puts = open_opt[
-            open_opt["OptionType"].str.contains("P", na=False)
-            & open_opt["PositionSide"].eq("SELL")
-        ].copy()
-
-        total_value = open_opt["ContractValue"].sum()
-        total_pnl = open_opt["PnL"].sum()
-        avg_spread = open_opt["Spread%"].replace([np.inf, -np.inf], np.nan).dropna().mean()
-        total_assignment_capital = short_puts["CapitalRequired"].sum()
-        usd_cash_available = total_cash / get_usdthb_rate() if get_usdthb_rate() else 0
-        safety_margin = usd_cash_available - total_assignment_capital
-        safety_margin_pct = (safety_margin / total_assignment_capital * 100) if total_assignment_capital > 0 else 0
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(f"""<div class="metric-card"><div class="metric-label">Open Contract Value</div><div class="metric-value">${total_value:,.0f}</div><div class="small-note">Mark value</div></div>""", unsafe_allow_html=True)
-        pnl_class = "metric-good" if total_pnl >= 0 else "metric-bad"
-        c2.markdown(f"""<div class="metric-card"><div class="metric-label">Open P/L</div><div class="metric-value {pnl_class}">${total_pnl:,.0f}</div><div class="small-note">Short premium adjusted</div></div>""", unsafe_allow_html=True)
-        c3.markdown(f"""<div class="metric-card"><div class="metric-label">Assignment Capital</div><div class="metric-value">${total_assignment_capital:,.0f}</div><div class="small-note">Short puts only</div></div>""", unsafe_allow_html=True)
-        margin_class = "metric-good" if safety_margin >= 0 else "metric-bad"
-        c4.markdown(f"""<div class="metric-card"><div class="metric-label">Safety Margin</div><div class="metric-value {margin_class}">${safety_margin:,.0f}</div><div class="small-note">{safety_margin_pct:,.1f}% of required capital</div></div>""", unsafe_allow_html=True)
-
-        st.subheader("🛡️ Assignment Risk Dashboard")
-        if short_puts.empty:
-            st.info("ยังไม่มี Short Put สำหรับคำนวณ assignment risk")
-        else:
-            assignment_summary = short_puts[[
-                "Underlying", "Strike", "Expiry", "DTE", "Contracts", "UnderlyingPrice",
-                "PremiumUsed", "AssignmentPrice", "CapitalRequired", "PremiumIncome",
-                "PremiumReturn%", "AnnualizedReturn%", "Moneyness%", "Delta", "Status"
-            ]].sort_values("CapitalRequired", ascending=False)
-
-            st.dataframe(
-                assignment_summary.round(2),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "PremiumUsed": st.column_config.NumberColumn("Premium", format="$%.2f"),
-                    "AssignmentPrice": st.column_config.NumberColumn("Net Assign Price", format="$%.2f"),
-                    "CapitalRequired": st.column_config.NumberColumn("Required Capital", format="$%.0f"),
-                    "PremiumIncome": st.column_config.NumberColumn("Premium Income", format="$%.0f"),
-                    "PremiumReturn%": st.column_config.NumberColumn("Return", format="%.2f%%"),
-                    "AnnualizedReturn%": st.column_config.NumberColumn("Annualized", format="%.2f%%"),
-                    "Moneyness%": st.column_config.NumberColumn("Distance to Strike", format="%.2f%%"),
-                },
-            )
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.plotly_chart(
-                    px.bar(short_puts, x="Underlying", y="CapitalRequired", color="Status", title="Assignment Capital by Underlying"),
-                    use_container_width=True,
-                )
-            with c2:
-                risk_meter = pd.DataFrame({
-                    "Category": ["USD Cash Available", "Short Put Assignment Capital", "Safety Margin"],
-                    "Value": [usd_cash_available, total_assignment_capital, safety_margin],
-                })
-                st.plotly_chart(
-                    px.bar(risk_meter, x="Category", y="Value", title="Cash vs Assignment Requirement"),
-                    use_container_width=True,
-                )
-
-            if safety_margin < 0:
-                st.error("⚠️ Overallocated: ถ้าถูก assign ทุกสัญญาพร้อมกัน เงินสด USD ไม่พอรับหุ้นทั้งหมด")
-            elif safety_margin_pct < 20:
-                st.warning("🟡 Safety margin ต่ำกว่า 20% ควรระวังการเปิด short put เพิ่ม")
-            else:
-                st.success("🟢 Assignment risk ยังอยู่ในกรอบเงินสดที่มี")
-
-        st.subheader("💰 Cash Secured Put Scanner")
-        scanner = opt[
-            opt["OptionType"].str.contains("P", na=False)
-            & opt["PositionSide"].isin(["SELL", "WATCH"])
-            & (opt["DTE"] > 0)
-            & (opt["PremiumUsed"] > 0)
-            & (opt["Strike"] > 0)
-        ].copy()
-
-        if scanner.empty:
-            st.info("ยังไม่มีข้อมูล PUT สำหรับ scanner")
-        else:
-            c1, c2, c3 = st.columns(3)
-            min_annual = c1.slider("ขั้นต่ำ Annualized Return (%)", 0, 100, 10)
-            max_spread = c2.slider("Spread สูงสุด (%)", 0, 100, 30)
-            min_oi = c3.number_input("Open Interest ขั้นต่ำ", min_value=0, value=0, step=10)
-
-            scanner = scanner[
-                (scanner["AnnualizedReturn%"] >= min_annual)
-                & (scanner["Spread%"] <= max_spread)
-                & (scanner["OpenInterest"] >= min_oi)
-            ].sort_values(["AnnualizedReturn%", "StarRating"], ascending=False)
-
-            show_cols = [
-                "Underlying", "Strike", "Expiry", "DTE", "UnderlyingPrice",
-                "PremiumUsed", "CurrentBid", "CurrentMark", "CurrentAsk",
-                "AssignmentPrice", "CapitalRequired", "PremiumReturn%",
-                "AnnualizedReturn%", "Moneyness%", "Delta", "IV", "OpenInterest",
-                "Volume", "Spread%", "StarRating", "Status", "Note"
-            ]
-
-            st.dataframe(
-                scanner[show_cols].round(3),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "PremiumUsed": st.column_config.NumberColumn("Premium", format="$%.2f"),
-                    "AssignmentPrice": st.column_config.NumberColumn("Net Assign Price", format="$%.2f"),
-                    "CapitalRequired": st.column_config.NumberColumn("Required Capital", format="$%.0f"),
-                    "PremiumReturn%": st.column_config.NumberColumn("Return", format="%.2f%%"),
-                    "AnnualizedReturn%": st.column_config.NumberColumn("Annualized", format="%.2f%%"),
-                    "Moneyness%": st.column_config.NumberColumn("Distance to Strike", format="%.2f%%"),
-                    "Spread%": st.column_config.NumberColumn("Spread", format="%.2f%%"),
-                    "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
-                },
-            )
-
-        st.subheader("⚔️ Contract Monitor")
-        monitor_cols = [
-            "Underlying", "OptionType", "PositionSide", "Strike", "Expiry", "DTE", "Contracts",
-            "UnderlyingPrice", "CurrentBid", "CurrentMark", "CurrentAsk", "Spread%",
-            "Delta", "Gamma", "Theta", "Vega", "IV",
-            "OpenInterest", "Volume", "StarRating", "PnL", "PnL%",
-            "Status", "Note"
-        ]
-
-        st.dataframe(
-            opt[monitor_cols].round(3).sort_values("StarRating", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "CurrentBid": st.column_config.NumberColumn("Bid", format="$%.2f"),
-                "CurrentMark": st.column_config.NumberColumn("Mark", format="$%.2f"),
-                "CurrentAsk": st.column_config.NumberColumn("Ask", format="$%.2f"),
-                "Spread%": st.column_config.NumberColumn("Spread", format="%.2f%%"),
-                "StarRating": st.column_config.ProgressColumn("Star Radar", min_value=0, max_value=5),
-                "PnL": st.column_config.NumberColumn("P/L", format="$%.2f"),
-                "PnL%": st.column_config.NumberColumn("P/L %", format="%.2f%%"),
-            },
-        )
-
-        st.subheader("🔥 Option Heat Map")
-        c1, c2 = st.columns(2)
-        with c1:
+        priced_watch = watch[watch["CurrentPrice"] > 0]
+        if not priced_watch.empty:
+            st.subheader("Watchlist Target Upside")
             st.plotly_chart(
-                px.bar(opt, x="Underlying", y="StarRating", color="OptionType", title="Star Rating by Contract"),
+                px.bar(priced_watch, x="Symbol", y="UpsideToTarget %", color="Theme", title="Upside to Target Price"),
                 use_container_width=True,
             )
-        with c2:
-            st.plotly_chart(
-                px.scatter(
-                    opt,
-                    x="Spread%",
-                    y="OpenInterest",
-                    size="Volume",
-                    color="OptionType",
-                    hover_name="Underlying",
-                    title="Liquidity Map: Spread vs Open Interest",
-                ),
-                use_container_width=True,
-            )
-
-        st.info(
-            "แท็บ options ใน Google Sheet ควรมีคอลัมน์: "
-            "Underlying, OptionType, PositionSide, Strike, Expiry, Contracts, EntryPrice, "
-            "CurrentBid, CurrentMark, CurrentAsk, Delta, Gamma, Theta, Vega, IV, Volume, "
-            "OpenInterest, UnderlyingPrice, Status, Note"
-        )
-
 
 
 # =====================================================
