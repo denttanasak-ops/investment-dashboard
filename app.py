@@ -1118,6 +1118,141 @@ def build_news_query(symbol: str, name: str = "") -> str:
     return f"{symbol} stock"
 
 
+def get_direct_news_watchlist(symbols: list, watchlist_df: pd.DataFrame, max_symbols: int = 25, max_items: int = 3) -> pd.DataFrame:
+    name_map = {}
+    theme_map = {}
+    if watchlist_df is not None and not watchlist_df.empty:
+        for _, row in watchlist_df.iterrows():
+            s = clean_ticker(row.get("Symbol", ""))
+            if s:
+                name_map[s] = str(row.get("Name", "")).strip()
+                theme_map[s] = str(row.get("Theme", "")).strip()
+
+    rows = []
+    for symbol in symbols[:max_symbols]:
+        symbol = clean_ticker(symbol)
+        if not symbol or symbol in MANUAL_ONLY_TICKERS or symbol.endswith("80"):
+            continue
+
+        name = name_map.get(symbol, "")
+        theme = theme_map.get(symbol, "")
+        query = build_news_query(symbol, name)
+        items = fetch_google_news_rss(query, max_items=max_items)
+
+        headlines = " | ".join([item.get("title", "") for item in items])
+        sources = ", ".join(sorted(list({item.get("source", "") for item in items if item.get("source", "")})))
+        latest_time = items[0].get("published", "") if items else ""
+        news_count = len(items)
+
+        if news_count >= 3:
+            heat = "🔥 Hot"
+            score = 3
+        elif news_count == 2:
+            heat = "🟡 Active"
+            score = 2
+        elif news_count == 1:
+            heat = "🔵 Watch"
+            score = 1
+        else:
+            heat = "⚪ Quiet"
+            score = 0
+
+        rows.append({
+            "Symbol": symbol,
+            "Name": name,
+            "Theme": theme,
+            "NewsType": "Direct",
+            "NewsHeat": heat,
+            "NewsScore": score,
+            "LatestTime": latest_time,
+            "Sources": sources,
+            "Headlines": headlines,
+            "SearchQuery": query,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["NewsScore", "Symbol"], ascending=[False, True])
+
+
+def get_indirect_news_watchlist(max_items: int = 3) -> pd.DataFrame:
+    macro_themes = [
+        {
+            "MacroTheme": "US-Iran / Middle East conflict",
+            "SearchQuery": "US Iran conflict oil prices gold market stocks",
+            "AffectedAssets": "Oil, XLE, XOM, CVX, GLD, Defense/ITA, BTC",
+            "Reason": "ความเสี่ยงภูมิรัฐศาสตร์มักกระทบน้ำมัน ทอง หุ้นพลังงาน หุ้นกลาโหม และสินทรัพย์เสี่ยง",
+        },
+        {
+            "MacroTheme": "Fed rate / US yields",
+            "SearchQuery": "Federal Reserve rate cut Treasury yield Nasdaq gold",
+            "AffectedAssets": "QQQ, SPY, GLD, BTC, Banks, TLT",
+            "Reason": "ดอกเบี้ยและ bond yield กระทบ valuation หุ้น growth, ทอง, Bitcoin และธนาคาร",
+        },
+        {
+            "MacroTheme": "AI chip cycle",
+            "SearchQuery": "AI chip demand Nvidia AMD semiconductor stocks",
+            "AffectedAssets": "NVDA, AMD, AVGO, SOXX, TSM",
+            "Reason": "ข่าวชิป AI ส่งผลต่อหุ้น semiconductor และหุ้นที่อยู่ใน supply chain",
+        },
+        {
+            "MacroTheme": "China stimulus / China economy",
+            "SearchQuery": "China stimulus economy stocks ETF",
+            "AffectedAssets": "MCHI, BABA, JD, Emerging Markets, Commodities",
+            "Reason": "นโยบายจีนกระทบหุ้นจีน ตลาดเกิดใหม่ และสินค้าโภคภัณฑ์",
+        },
+        {
+            "MacroTheme": "India growth / travel",
+            "SearchQuery": "India economy travel demand MakeMyTrip stock",
+            "AffectedAssets": "INDA, MMYT, India consumer/travel",
+            "Reason": "เศรษฐกิจและการเดินทางในอินเดียกระทบหุ้นธีม India growth",
+        },
+        {
+            "MacroTheme": "Crypto regulation / Bitcoin ETF flow",
+            "SearchQuery": "Bitcoin ETF inflow crypto regulation market",
+            "AffectedAssets": "BTC-USD, COIN, Crypto-related stocks",
+            "Reason": "เงินไหลเข้า ETF และกฎเกณฑ์คริปโตกระทบ Bitcoin และหุ้นเกี่ยวข้อง",
+        },
+    ]
+
+    rows = []
+    for theme in macro_themes:
+        items = fetch_google_news_rss(theme["SearchQuery"], max_items=max_items)
+        headlines = " | ".join([item.get("title", "") for item in items])
+        sources = ", ".join(sorted(list({item.get("source", "") for item in items if item.get("source", "")})))
+        latest_time = items[0].get("published", "") if items else ""
+        news_count = len(items)
+
+        if news_count >= 3:
+            heat = "🔥 Hot"
+            score = 3
+        elif news_count == 2:
+            heat = "🟡 Active"
+            score = 2
+        elif news_count == 1:
+            heat = "🔵 Watch"
+            score = 1
+        else:
+            heat = "⚪ Quiet"
+            score = 0
+
+        rows.append({
+            "MacroTheme": theme["MacroTheme"],
+            "NewsType": "Indirect",
+            "NewsHeat": heat,
+            "NewsScore": score,
+            "AffectedAssets": theme["AffectedAssets"],
+            "Reason": theme["Reason"],
+            "LatestTime": latest_time,
+            "Sources": sources,
+            "Headlines": headlines,
+            "SearchQuery": theme["SearchQuery"],
+        })
+
+    return pd.DataFrame(rows).sort_values(["NewsScore", "MacroTheme"], ascending=[False, True])
+
+
+
 # =====================================================
 # LOAD ALL DATA ONCE
 # =====================================================
@@ -1162,14 +1297,12 @@ st.sidebar.metric("Property Equity", format_thb(property_equity))
 # TABS
 # =====================================================
 
-tab_wealth, tab_portfolio, tab_retirement, tab_news, tab_macro, tab_watchlist, tab_auto, tab_options, tab_market = st.tabs([
+tab_wealth, tab_portfolio, tab_news, tab_macro, tab_watchlist, tab_options, tab_market = st.tabs([
     "💰 My Wealth",
     "📈 Portfolio Dashboard",
-    "🎯 Retirement Plan",
     "📰 Portfolio News",
     "🌍 Macro Dashboard",
     "👀 Watchlist",
-    "⭐ Auto Watchlist",
     "🧨 Options War Room",
     "🔎 Market Analysis",
 ])
@@ -1298,46 +1431,7 @@ with tab_portfolio:
 
 
 # =====================================================
-# TAB 3: RETIREMENT PLAN
-# =====================================================
-
-with tab_retirement:
-    st.header("🎯 Retirement Plan")
-
-    c1, c2, c3 = st.columns(3)
-    target_value = c1.number_input("Target Value", min_value=0, value=DEFAULT_TARGET_VALUE, step=100_000)
-    monthly_contribution = c2.number_input("Monthly Contribution", min_value=0, value=DEFAULT_MONTHLY_CONTRIBUTION, step=5_000)
-    expected_return = c3.number_input("Expected Return / Year (%)", min_value=0.0, max_value=30.0, value=DEFAULT_EXPECTED_RETURN * 100, step=0.5) / 100
-
-    progress = min(net_worth / target_value, 1) if target_value > 0 else 0
-    months_needed, projected_value = calculate_goal_projection(net_worth, monthly_contribution, target_value, expected_return)
-    years_needed = months_needed / 12
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current Net Worth", format_thb(net_worth))
-    c2.metric("Target", format_thb(target_value))
-    c3.metric("Progress", pct(progress * 100))
-    c4.metric("Estimated Time", f"{years_needed:.1f} years")
-
-    st.progress(progress)
-
-    projection_rows = []
-    value = net_worth
-    monthly_rate = expected_return / 12
-
-    for month in range(0, 121):
-        if month > 0:
-            value = value * (1 + monthly_rate) + monthly_contribution
-        if month % 12 == 0:
-            projection_rows.append({"Year": month // 12, "Projected Value": value})
-
-    projection_df = pd.DataFrame(projection_rows)
-    st.line_chart(projection_df.set_index("Year"))
-    st.dataframe(projection_df, use_container_width=True, hide_index=True)
-
-
-# =====================================================
-# TAB 4: PORTFOLIO NEWS
+# TAB 3: PORTFOLIO NEWS
 # =====================================================
 
 with tab_news:
@@ -1409,7 +1503,7 @@ with tab_news:
 
 
 # =====================================================
-# TAB 5: MACRO DASHBOARD
+# TAB 4: MACRO DASHBOARD
 # =====================================================
 
 with tab_macro:
@@ -1514,14 +1608,16 @@ with tab_macro:
             st.caption("Risk metrics คำนวณจาก daily returns และ annualize ด้วย 252 trading days; Sharpe ใช้ risk-free rate = 0")
 
 
+
 # =====================================================
-# TAB 6: WATCHLIST
+# TAB 5: WATCHLIST + AUTO WATCHLIST
 # =====================================================
 
 with tab_watchlist:
-    st.header("👀 Watchlist")
-    st.caption("รายการเฝ้าดูจาก Google Sheet แท็บ watchlist")
+    st.header("👀 Watchlist + Auto Watchlist")
+    st.caption("รวมรายการเฝ้าดูจาก Google Sheet กับ Auto Watchlist ที่ระบบสแกนจาก Portfolio + Watchlist + Scan Universe")
 
+    st.subheader("📌 Manual Watchlist from Google Sheet")
     if watchlist.empty:
         st.info("ยังไม่มี watchlist ให้สร้างแท็บ watchlist ใน Google Sheet โดยมีคอลัมน์ Symbol, Name, Theme, TargetPrice, Thesis")
     else:
@@ -1533,33 +1629,23 @@ with tab_watchlist:
         watch["CurrentPrice"] = watch["YFinanceSymbol"].map(current_prices)
         watch["CurrentPrice"] = to_number(watch["CurrentPrice"])
         watch["UpsideToTarget %"] = np.where(
-            watch["TargetPrice"] > 0,
+            (watch["TargetPrice"] > 0) & (watch["CurrentPrice"] > 0),
             (watch["TargetPrice"] / watch["CurrentPrice"] - 1) * 100,
             0,
         )
-        watch.loc[watch["CurrentPrice"] == 0, "UpsideToTarget %"] = 0
 
         st.dataframe(watch.round(2), use_container_width=True, hide_index=True)
 
-        priced_watch = watch[watch["CurrentPrice"] > 0]
+        priced_watch = watch[(watch["CurrentPrice"] > 0) & (watch["TargetPrice"] > 0)]
         if not priced_watch.empty:
-            st.subheader("Watchlist Target Upside")
             st.plotly_chart(
-                px.bar(priced_watch, x="Symbol", y="UpsideToTarget %", color="Theme", title="Upside to Target Price"),
+                px.bar(priced_watch, x="Symbol", y="UpsideToTarget %", color="Theme", title="Manual Watchlist: Upside to Target Price"),
                 use_container_width=True,
             )
 
-
-
-
-
-# =====================================================
-# TAB 7: AUTO WATCHLIST / OPTION CANDIDATES
-# =====================================================
-
-with tab_auto:
-    st.header("⭐ Auto Watchlist / Option Candidate Screener")
-    st.caption("คัดหุ้นจาก Portfolio + Manual Watchlist + Scan Universe ด้วย Multi-Timeframe Trend, MACD, RSI และ Fair Value Lite")
+    st.divider()
+    st.subheader("⭐ Auto Watchlist / Option Candidate Screener")
+    st.caption("คัดหุ้นด้วย Multi-Timeframe Trend, MACD, RSI, Momentum และ Fair Value Lite จาก yfinance")
 
     c1, c2, c3 = st.columns([2, 1, 1])
     extra_input = c1.text_input(
@@ -1674,9 +1760,8 @@ with tab_auto:
 
 
 
-
 # =====================================================
-# TAB 8: OPTIONS WAR ROOM
+# TAB 6: OPTIONS WAR ROOM
 # =====================================================
 
 with tab_options:
@@ -1977,7 +2062,7 @@ with tab_options:
 
 
 # =====================================================
-# TAB 9: MARKET ANALYSIS
+# TAB 7: MARKET ANALYSIS
 # =====================================================
 
 with tab_market:
