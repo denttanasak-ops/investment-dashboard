@@ -1150,6 +1150,62 @@ def apply_manual_target_prices(candidates: pd.DataFrame, watchlist_df: pd.DataFr
 
 
 
+def ensure_candidate_display_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Make Auto Watchlist robust when some optional columns are missing."""
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    defaults = {
+        "Name": "",
+        "Theme": "",
+        "Thesis": "",
+        "Conviction": "",
+        "SuggestedSetup": "",
+        "SignalToday": "",
+        "FairValueSource": "N/A",
+        "FairValue": np.nan,
+        "AnalystTarget": np.nan,
+        "ForwardPE": np.nan,
+        "MarginSafety%": 0.0,
+        "FairValueScore": 5.0,
+        "TotalScore": 0.0,
+        "TrendScore": 0.0,
+        "MomentumScore": 0.0,
+        "RiskScore": 0.0,
+    }
+
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    def _display_number(x):
+        try:
+            if pd.isna(x) or float(x) <= 0:
+                return "N/A"
+            return f"{float(x):,.2f}"
+        except Exception:
+            return "N/A"
+
+    if "FairValueDisplay" not in df.columns:
+        df["FairValueDisplay"] = df["FairValue"].apply(_display_number)
+    if "AnalystTargetDisplay" not in df.columns:
+        df["AnalystTargetDisplay"] = df["AnalystTarget"].apply(_display_number)
+    if "ForwardPEDisplay" not in df.columns:
+        df["ForwardPEDisplay"] = df["ForwardPE"].apply(_display_number)
+
+    return df
+
+
+def existing_columns(df: pd.DataFrame, cols: list) -> list:
+    """Return only columns that exist in df, preserving order."""
+    if df is None or df.empty:
+        return []
+    return [c for c in cols if c in df.columns]
+
+
+
 # =====================================================
 # NEWS
 # =====================================================
@@ -1951,6 +2007,7 @@ with tab_watchlist:
     with st.spinner("กำลังสแกน trend / fair value / momentum จาก yfinance..."):
         candidates = build_option_candidate_screener(universe, max_symbols=max_symbols)
         candidates = apply_manual_target_prices(candidates, watchlist)
+        candidates = ensure_candidate_display_columns(candidates)
 
     if candidates.empty:
         st.warning("ยังไม่มีข้อมูลพอสำหรับสร้าง Auto Watchlist")
@@ -1979,7 +2036,7 @@ with tab_watchlist:
                 "SignalToday"
             ]
             st.dataframe(
-                candidates[high_cols].round(2),
+                candidates[existing_columns(candidates, high_cols)].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -1996,7 +2053,7 @@ with tab_watchlist:
             st.subheader("📈 Multi-Timeframe Trend")
             trend_cols = ["Symbol", "ShortTrend", "MediumTrend", "LongTrend", "TrendScore", "MACD", "MACDSignal", "MACDHist", "RSI14", "PctFromHigh252%"]
             st.dataframe(
-                candidates[trend_cols].round(3),
+                candidates[existing_columns(candidates, trend_cols)].round(3),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2011,7 +2068,7 @@ with tab_watchlist:
             st.subheader("💰 Fair Value Lite")
             fv_cols = ["Symbol", "Name", "Theme", "Price", "FairValueDisplay", "AnalystTargetDisplay", "MarginSafety%", "ForwardPEDisplay", "FairValueSource", "FairValueScore", "Thesis"]
             st.dataframe(
-                candidates[fv_cols].round(2),
+                candidates[existing_columns(candidates, fv_cols)].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2028,7 +2085,7 @@ with tab_watchlist:
                 st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
             else:
                 st.dataframe(
-                    signal_today[["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
+                    signal_today[existing_columns(signal_today, ["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"])].round(2),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -2045,7 +2102,7 @@ with tab_watchlist:
                 use_container_width=True,
             )
             score_cols = ["Symbol", "TotalScore", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
-            st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
+            st.dataframe(candidates[existing_columns(candidates, score_cols)].round(2), use_container_width=True, hide_index=True)
 
             st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
 
