@@ -8,6 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 
@@ -235,7 +236,7 @@ table.sticky-ticker-table th:first-child {{
 {html_table}
 </div>
 """
-    st.components.v1.html(html, height=height + 80, scrolling=True)
+    components.html(html, height=height + 80, scrolling=True)
 
 
 # =====================================================
@@ -439,6 +440,36 @@ def fx_to_thb(currency):
     if currency == "USD":
         return get_usdthb_rate()
     return 1.0
+
+
+
+# =====================================================
+# GOOGLE SHEET HELPERS
+# =====================================================
+
+def google_sheet_csv_url(sheet_id: str, tab_name: str) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(tab_name)}"
+
+
+@st.cache_data(ttl=300)
+def read_google_sheet_tab(sheet_id: str, tab_name: str) -> pd.DataFrame:
+    url = google_sheet_csv_url(sheet_id, tab_name)
+    return pd.read_csv(url)
+
+
+def safe_read_tab(tab_key: str, fallback_df: pd.DataFrame) -> pd.DataFrame:
+    tab_name = SHEET_TABS.get(tab_key, tab_key)
+    try:
+        df = read_google_sheet_tab(GOOGLE_SHEET_ID, tab_name)
+        if df is None or df.empty:
+            st.sidebar.warning(f"โหลด Google Sheet แท็บ '{tab_name}' ได้ แต่ไม่มีข้อมูล")
+            return fallback_df.copy()
+        st.sidebar.success(f"โหลด Google Sheet แท็บ '{tab_name}' ได้")
+        return df
+    except Exception as e:
+        st.sidebar.warning(f"โหลด Google Sheet แท็บ '{tab_name}' ไม่ได้ ใช้ fallback แทน")
+        return fallback_df.copy()
+
 
 
 # =====================================================
@@ -2313,11 +2344,12 @@ with tab_options:
         if short_puts.empty:
             st.info("ยังไม่มี Short Put สำหรับคำนวณ assignment risk")
         else:
-            assignment_summary = short_puts[[
+            assignment_cols = [
                 "Underlying", "Strike", "Expiry", "DTE", "Contracts", "UnderlyingPrice",
                 "PremiumUsed", "AssignmentPrice", "CapitalRequired", "PremiumIncome",
                 "PremiumReturn%", "AnnualizedReturn%", "Moneyness%", "Delta", "Status"
-            ]].sort_values("CapitalRequired", ascending=False)
+            ]
+            assignment_summary = short_puts[existing_columns(short_puts, assignment_cols)].sort_values("CapitalRequired", ascending=False)
 
             st.dataframe(
                 assignment_summary.round(2),
@@ -2414,7 +2446,7 @@ with tab_options:
         ]
 
         st.dataframe(
-            opt[existing_columns(opt, monitor_cols)].round(3).sort_values("StarRating", ascending=False),
+            opt[existing_columns(opt, monitor_cols)].round(3).sort_values("StarRating", ascending=False) if "StarRating" in opt.columns else opt[existing_columns(opt, monitor_cols)].round(3),
             use_container_width=True,
             hide_index=True,
             column_config={
