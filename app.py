@@ -21,19 +21,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Make the first dataframe column easier to keep track of in very wide tables.
-st.markdown("""
-<style>
-[data-testid="stDataFrame"] div[role="gridcell"]:first-child,
-[data-testid="stDataFrame"] div[role="columnheader"]:first-child {
-    position: sticky;
-    left: 0;
-    z-index: 3;
-    background: #0e1117;
-}
-</style>
-""", unsafe_allow_html=True)
-
 BASE_CURRENCY = "THB"
 GOOGLE_SHEET_ID = "1NfxJUlUyFmeSFjFCNLF7Xoeuu_vP_dfk9Hi2HP7Yl_c"
 
@@ -1689,7 +1676,7 @@ with tab_portfolio:
         q4.metric("Median Gross Margin", pct(quality_df["GrossMargin%"].median()))
 
         left_ref_cols = ["Ticker", "QualityRating", "QualityScore", "Sector"]
-        st.caption("ตารางซ้ายเป็นตัวช่วยจำชื่อหุ้น/คะแนน ส่วนตารางใหญ่ด้านล่างเลื่อนขวาเพื่อดูรายละเอียดงบการเงิน")
+        st.caption("ตารางสรุปซ้ายไว้ดูชื่อหุ้น/คะแนน ขณะเลื่อนดูตารางงบการเงินด้านล่าง")
         st.dataframe(
             quality_df[existing_columns(quality_df, left_ref_cols)].round(2),
             use_container_width=True,
@@ -1701,17 +1688,12 @@ with tab_portfolio:
 
         quality_display = build_quality_display_df(quality_df)
 
-        # Keep ticker visible while horizontally scrolling:
-        # use Ticker as the dataframe index instead of hiding it as a normal column.
-        if "Ticker" in quality_display.columns:
-            quality_display_for_view = quality_display.set_index("Ticker")
-        else:
-            quality_display_for_view = quality_display
-
+        # Safe wide table: avoid pandas Styler/CSS because some Streamlit versions error.
+        # Ticker is kept as the first column and repeated in the compact table above.
         st.dataframe(
-            quality_table_style(quality_display_for_view.reset_index(), quality_df).hide(axis="index"),
+            quality_display,
             use_container_width=True,
-            hide_index=False,
+            hide_index=True,
             column_config={
                 "Ticker": st.column_config.TextColumn("Ticker"),
                 "QualityScore": st.column_config.ProgressColumn("Quality Score", min_value=0, max_value=100),
