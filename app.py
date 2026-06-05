@@ -164,6 +164,13 @@ def ensure_columns(df, columns):
     return df[list(columns.keys())]
 
 
+def existing_columns(df: pd.DataFrame, columns: list) -> list:
+    """Return only columns that exist in df, to prevent KeyError when merged app versions differ."""
+    if df is None or df.empty:
+        return []
+    return [c for c in columns if c in df.columns]
+
+
 # =====================================================
 # GOOGLE SHEET LOADERS
 # =====================================================
@@ -1676,7 +1683,7 @@ with tab_portfolio:
         q4.metric("Median Gross Margin", pct(quality_df["GrossMargin%"].median()))
 
         left_ref_cols = ["Ticker", "QualityRating", "QualityScore", "Sector"]
-        st.caption("ตารางสรุปซ้ายไว้ดูชื่อหุ้น/คะแนน ขณะเลื่อนดูตารางงบการเงินด้านล่าง")
+        st.caption("ตารางสรุปนี้ไว้ดูชื่อหุ้น/คะแนนก่อนเลื่อนดูตารางงบการเงินแบบละเอียดด้านล่าง")
         st.dataframe(
             quality_df[existing_columns(quality_df, left_ref_cols)].round(2),
             use_container_width=True,
@@ -1687,15 +1694,11 @@ with tab_portfolio:
         )
 
         quality_display = build_quality_display_df(quality_df)
-
-        # Safe wide table: avoid pandas Styler/CSS because some Streamlit versions error.
-        # Ticker is kept as the first column and repeated in the compact table above.
         st.dataframe(
-            quality_display,
+            quality_table_style(quality_display, quality_df),
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Ticker": st.column_config.TextColumn("Ticker"),
                 "QualityScore": st.column_config.ProgressColumn("Quality Score", min_value=0, max_value=100),
             },
         )
@@ -2044,7 +2047,7 @@ with tab_watchlist:
                 "SignalToday"
             ]
             st.dataframe(
-                candidates[high_cols].round(2),
+                candidates[existing_columns(candidates, high_cols)].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2061,7 +2064,7 @@ with tab_watchlist:
             st.subheader("📈 Multi-Timeframe Trend")
             trend_cols = ["Symbol", "ShortTrend", "MediumTrend", "LongTrend", "TrendScore", "MACD", "MACDSignal", "MACDHist", "RSI14", "PctFromHigh252%"]
             st.dataframe(
-                candidates[trend_cols].round(3),
+                candidates[existing_columns(candidates, trend_cols)].round(3),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2076,7 +2079,7 @@ with tab_watchlist:
             st.subheader("💰 Fair Value Lite")
             fv_cols = ["Symbol", "Price", "FairValue", "AnalystTarget", "MarginSafety%", "ForwardPE", "FairValueSource", "FairValueScore"]
             st.dataframe(
-                candidates[fv_cols].round(2),
+                candidates[existing_columns(candidates, fv_cols)].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2090,7 +2093,7 @@ with tab_watchlist:
                 st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
             else:
                 st.dataframe(
-                    signal_today[["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
+                    signal_today[existing_columns(signal_today, ["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"])].round(2),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -2107,7 +2110,7 @@ with tab_watchlist:
                 use_container_width=True,
             )
             score_cols = ["Symbol", "TotalScore", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
-            st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
+            st.dataframe(candidates[existing_columns(candidates, score_cols)].round(2), use_container_width=True, hide_index=True)
 
             st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
 
@@ -2345,7 +2348,7 @@ with tab_options:
             ]
 
             st.dataframe(
-                scanner[show_cols].round(3),
+                scanner[existing_columns(scanner, show_cols)].round(3),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2370,7 +2373,7 @@ with tab_options:
         ]
 
         st.dataframe(
-            opt[monitor_cols].round(3).sort_values("StarRating", ascending=False),
+            opt[existing_columns(opt, monitor_cols)].round(3).sort_values("StarRating", ascending=False),
             use_container_width=True,
             hide_index=True,
             column_config={
