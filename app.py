@@ -171,6 +171,72 @@ def existing_columns(df: pd.DataFrame, columns: list) -> list:
     return [c for c in columns if c in df.columns]
 
 
+def render_sticky_ticker_table(df: pd.DataFrame, height: int = 520):
+    """Render a wide dataframe as HTML with the first column sticky on the left."""
+    if df is None or df.empty:
+        st.info("ไม่มีข้อมูลให้แสดง")
+        return
+
+    view = df.copy()
+    view = view.replace([np.inf, -np.inf], np.nan)
+    view = view.round(2)
+
+    html = view.to_html(index=False, escape=False, classes="sticky-ticker-table")
+
+    st.markdown(f"""
+    <style>
+    .sticky-table-wrap {{
+        max-height: {height}px;
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 12px;
+        background: white;
+    }}
+    table.sticky-ticker-table {{
+        border-collapse: collapse;
+        width: max-content;
+        min-width: 100%;
+        font-size: 14px;
+    }}
+    table.sticky-ticker-table th,
+    table.sticky-ticker-table td {{
+        border: 1px solid #e5e7eb;
+        padding: 9px 12px;
+        white-space: nowrap;
+        text-align: right;
+        background: white;
+        color: #111827;
+    }}
+    table.sticky-ticker-table th {{
+        position: sticky;
+        top: 0;
+        z-index: 3;
+        background: #f8fafc;
+        color: #6b7280;
+        font-weight: 700;
+    }}
+    table.sticky-ticker-table th:first-child,
+    table.sticky-ticker-table td:first-child {{
+        position: sticky;
+        left: 0;
+        z-index: 4;
+        background: #f8fafc;
+        color: #111827;
+        font-weight: 800;
+        text-align: left;
+        box-shadow: 3px 0 6px rgba(0,0,0,0.08);
+    }}
+    table.sticky-ticker-table th:first-child {{
+        z-index: 5;
+        background: #eef2ff;
+    }}
+    </style>
+    <div class="sticky-table-wrap">
+        {html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # =====================================================
 # GOOGLE SHEET LOADERS
 # =====================================================
@@ -1748,10 +1814,12 @@ with tab_portfolio:
             "ForwardPE", "ForwardPE_SectorAvg",
             "DataSource"
         ]
-        st.dataframe(quality_df[existing_columns(quality_df, raw_cols)].round(2), use_container_width=True, hide_index=True)
+        raw_quality_view = quality_df[existing_columns(quality_df, raw_cols)].copy()
+        render_sticky_ticker_table(raw_quality_view, height=520)
 
         st.info(
-            "หมายเหตุ: เวอร์ชันนี้ใช้ yfinance เป็นหลัก บางตัวอาจไม่มี ROIC, EV/FCF, FCF Growth ครบ จึงแสดง N/A ได้ "
+            "หมายเหตุ: ตาราง Raw Metrics + Sector Average ล็อกคอลัมน์ Ticker ทางซ้ายแล้ว "
+            "เวอร์ชันนี้ใช้ yfinance เป็นหลัก บางตัวอาจไม่มี ROIC, EV/FCF, FCF Growth ครบ จึงแสดง N/A ได้ "
             "Sector Average ใช้ proxy median + fallback เพื่อให้ใช้งานได้ฟรีก่อน หากต้องการแม่นระดับมืออาชีพควรต่อ FinancialModelingPrep / Alpha Vantage / Finnhub ภายหลัง"
         )
 
