@@ -624,26 +624,16 @@ def calculate_portfolio(portfolio):
     portfolio["YFinancePrice"] = to_number(portfolio["YFinancePrice"])
 
     portfolio["CurrentPrice"] = portfolio["YFinancePrice"]
-
-    # BTC and other crypto symbols from yfinance are USD-denominated.
-    # If the sheet records them as THB assets, convert the yfinance USD quote into THB once,
-    # then set FxRateToTHB = 1 to avoid double conversion.
-    crypto_usd_price_mask = portfolio["YFinanceSymbol"].astype(str).str.endswith("-USD", na=False)
-    crypto_recorded_thb_mask = crypto_usd_price_mask & portfolio["Currency"].eq("THB") & (portfolio["YFinancePrice"] > 0)
-    portfolio.loc[crypto_recorded_thb_mask, "CurrentPrice"] = portfolio.loc[crypto_recorded_thb_mask, "YFinancePrice"] * get_usdthb_rate()
-
     use_manual = (portfolio["CurrentPrice"] == 0) & (portfolio["ManualPrice"] > 0)
     portfolio.loc[use_manual, "CurrentPrice"] = portfolio.loc[use_manual, "ManualPrice"]
     portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "CurrentPrice"] = 1
 
     portfolio["PriceSource"] = "yfinance"
-    portfolio.loc[crypto_recorded_thb_mask, "PriceSource"] = "yfinance USD→THB"
     portfolio.loc[use_manual, "PriceSource"] = "manual"
     portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "PriceSource"] = "cash"
     portfolio.loc[portfolio["CurrentPrice"] == 0, "PriceSource"] = "missing"
 
     portfolio["FxRateToTHB"] = portfolio["Currency"].apply(fx_to_thb)
-    portfolio.loc[crypto_recorded_thb_mask, "FxRateToTHB"] = 1
     portfolio.loc[portfolio["Ticker"].isin(["CASH", "CASH THB", "THB CASH", "เงินสด"]), "FxRateToTHB"] = 1
 
     portfolio["CostBasisNative"] = portfolio["Quantity"] * portfolio["AvgCost"]
@@ -1067,145 +1057,6 @@ def build_option_candidate_screener(symbols: list, max_symbols: int = 80) -> pd.
     return pd.DataFrame(rows).sort_values("TotalScore", ascending=False)
 
 
-
-def apply_manual_target_prices(candidates: pd.DataFrame, watchlist_df: pd.DataFrame) -> pd.DataFrame:
-    if candidates.empty or watchlist_df is None or watchlist_df.empty:
-        return candidates
-
-    df = candidates.copy()
-    target_map = {}
-    thesis_map = {}
-    theme_map = {}
-    name_map = {}
-
-    for _, row in watchlist_df.iterrows():
-        symbol = clean_ticker(row.get("Symbol", ""))
-        if not symbol:
-            continue
-        target_map[symbol] = float(row.get("TargetPrice", 0) or 0)
-        thesis_map[symbol] = str(row.get("Thesis", "") or "")
-        theme_map[symbol] = str(row.get("Theme", "") or "")
-        name_map[symbol] = str(row.get("Name", "") or "")
-
-    df["ManualTarget"] = df["Symbol"].map(target_map).fillna(0)
-    df["Theme"] = df["Symbol"].map(theme_map).fillna("")
-    df["Name"] = df["Symbol"].map(name_map).fillna("")
-    df["Thesis"] = df["Symbol"].map(thesis_map).fillna("")
-
-    manual_mask = df["ManualTarget"] > 0
-    df.loc[manual_mask, "FairValue"] = df.loc[manual_mask, "ManualTarget"]
-    df.loc[manual_mask, "AnalystTarget"] = df.loc[manual_mask, "ManualTarget"]
-    df.loc[manual_mask, "FairValueSource"] = "Manual TargetPrice from Google Sheet"
-
-    df["FairValueDisplay"] = df["FairValue"].apply(lambda x: "N/A" if pd.isna(x) or float(x) <= 0 else f"{float(x):,.2f}")
-    df["AnalystTargetDisplay"] = df["AnalystTarget"].apply(lambda x: "N/A" if pd.isna(x) or float(x) <= 0 else f"{float(x):,.2f}")
-    df["ForwardPEDisplay"] = df["ForwardPE"].apply(lambda x: "N/A" if pd.isna(x) or float(x) <= 0 else f"{float(x):,.2f}")
-
-    valid_fv = df["FairValue"].notna() & (df["FairValue"] > 0) & (df["Price"] > 0)
-    df.loc[valid_fv, "MarginSafety%"] = (df.loc[valid_fv, "FairValue"] / df.loc[valid_fv, "Price"] - 1) * 100
-
-    df["FairValueScore"] = np.select(
-        [
-            df["MarginSafety%"] >= 15,
-            df["MarginSafety%"] >= 5,
-            df["MarginSafety%"] >= -5,
-        ],
-        [10, 7, 5],
-        default=2,
-    )
-
-    # If there is no fair value data at all, make it neutral rather than misleadingly bearish.
-    no_fv = ~valid_fv
-    df.loc[no_fv, "FairValueScore"] = 5
-    df.loc[no_fv, "FairValueSource"] = df.loc[no_fv, "FairValueSource"].replace("", "N/A")
-
-    df["TotalScore"] = (
-        df["TrendScore"] * 0.40
-        + df["FairValueScore"] * 0.30
-        + df["MomentumScore"] * 0.20
-        + df["RiskScore"] * 0.10
-    )
-
-    df["Conviction"] = np.select(
-        [
-            df["TotalScore"] >= 9,
-            df["TotalScore"] >= 8,
-            df["TotalScore"] >= 7,
-        ],
-        ["🟢 High", "🟢 Good", "🟡 Watch"],
-        default="🔴 Avoid",
-    )
-
-    df["SuggestedSetup"] = np.select(
-        [
-            (df["TrendScore"] >= 8) & (df["MarginSafety%"] >= 5),
-            (df["TrendScore"] >= 8) & (df["MarginSafety%"] < 5),
-            df["TrendScore"] >= 7,
-        ],
-        ["CSP", "LEAPS / Wait Pullback", "Watch"],
-        default="Avoid",
-    )
-
-    return df.sort_values("TotalScore", ascending=False)
-
-
-
-def ensure_candidate_display_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Make Auto Watchlist robust when some optional columns are missing."""
-    if df is None or df.empty:
-        return df
-
-    df = df.copy()
-
-    defaults = {
-        "Name": "",
-        "Theme": "",
-        "Thesis": "",
-        "Conviction": "",
-        "SuggestedSetup": "",
-        "SignalToday": "",
-        "FairValueSource": "N/A",
-        "FairValue": np.nan,
-        "AnalystTarget": np.nan,
-        "ForwardPE": np.nan,
-        "MarginSafety%": 0.0,
-        "FairValueScore": 5.0,
-        "TotalScore": 0.0,
-        "TrendScore": 0.0,
-        "MomentumScore": 0.0,
-        "RiskScore": 0.0,
-    }
-
-    for col, default in defaults.items():
-        if col not in df.columns:
-            df[col] = default
-
-    def _display_number(x):
-        try:
-            if pd.isna(x) or float(x) <= 0:
-                return "N/A"
-            return f"{float(x):,.2f}"
-        except Exception:
-            return "N/A"
-
-    if "FairValueDisplay" not in df.columns:
-        df["FairValueDisplay"] = df["FairValue"].apply(_display_number)
-    if "AnalystTargetDisplay" not in df.columns:
-        df["AnalystTargetDisplay"] = df["AnalystTarget"].apply(_display_number)
-    if "ForwardPEDisplay" not in df.columns:
-        df["ForwardPEDisplay"] = df["ForwardPE"].apply(_display_number)
-
-    return df
-
-
-def existing_columns(df: pd.DataFrame, cols: list) -> list:
-    """Return only columns that exist in df, preserving order."""
-    if df is None or df.empty:
-        return []
-    return [c for c in cols if c in df.columns]
-
-
-
 # =====================================================
 # NEWS
 # =====================================================
@@ -1404,196 +1255,264 @@ def get_indirect_news_watchlist(max_items: int = 3) -> pd.DataFrame:
 
 
 # =====================================================
-# OPTION CHAIN / OPTION CALCULATOR HELPERS
+# QUALITY / VI FINANCIAL METRICS
 # =====================================================
 
-@st.cache_data(ttl=900)
-def get_option_expirations(symbol: str) -> list:
-    """Return available expirations from yfinance. Empty list if not available."""
+HIGHER_IS_BETTER_METRICS = {
+    "RevenueGrowth3Y%", "EPSGrowth3Y%", "FCFGrowth3Y%", "ROIC%",
+    "GrossMargin%", "OperatingMargin%", "InterestCoverage"
+}
+LOWER_IS_BETTER_METRICS = {"DebtToEquity", "EV/FCF", "EV/EBIT", "ForwardPE"}
+
+QUALITY_WEIGHTS = {
+    "RevenueGrowth3Y%": 15, "EPSGrowth3Y%": 15, "FCFGrowth3Y%": 15,
+    "ROIC%": 20, "GrossMargin%": 10, "OperatingMargin%": 10,
+    "DebtToEquity": 5, "InterestCoverage": 5, "EV/FCF": 3, "EV/EBIT": 2,
+}
+
+SECTOR_FALLBACK = {
+    "Technology": {"RevenueGrowth3Y%":12,"EPSGrowth3Y%":10,"FCFGrowth3Y%":10,"ROIC%":15,"GrossMargin%":55,"OperatingMargin%":22,"DebtToEquity":0.65,"InterestCoverage":12,"EV/FCF":28,"EV/EBIT":24,"ForwardPE":28},
+    "Communication Services": {"RevenueGrowth3Y%":8,"EPSGrowth3Y%":8,"FCFGrowth3Y%":8,"ROIC%":12,"GrossMargin%":48,"OperatingMargin%":20,"DebtToEquity":0.75,"InterestCoverage":10,"EV/FCF":22,"EV/EBIT":19,"ForwardPE":22},
+    "Consumer Cyclical": {"RevenueGrowth3Y%":7,"EPSGrowth3Y%":7,"FCFGrowth3Y%":7,"ROIC%":10,"GrossMargin%":38,"OperatingMargin%":10,"DebtToEquity":0.90,"InterestCoverage":7,"EV/FCF":20,"EV/EBIT":17,"ForwardPE":21},
+    "Healthcare": {"RevenueGrowth3Y%":7,"EPSGrowth3Y%":8,"FCFGrowth3Y%":8,"ROIC%":10,"GrossMargin%":58,"OperatingMargin%":18,"DebtToEquity":0.70,"InterestCoverage":9,"EV/FCF":24,"EV/EBIT":20,"ForwardPE":24},
+    "Financial Services": {"RevenueGrowth3Y%":6,"EPSGrowth3Y%":7,"FCFGrowth3Y%":6,"ROIC%":9,"GrossMargin%":np.nan,"OperatingMargin%":25,"DebtToEquity":1.80,"InterestCoverage":np.nan,"EV/FCF":14,"EV/EBIT":13,"ForwardPE":14},
+    "Energy": {"RevenueGrowth3Y%":6,"EPSGrowth3Y%":5,"FCFGrowth3Y%":5,"ROIC%":9,"GrossMargin%":32,"OperatingMargin%":16,"DebtToEquity":0.60,"InterestCoverage":8,"EV/FCF":13,"EV/EBIT":11,"ForwardPE":13},
+    "Industrials": {"RevenueGrowth3Y%":6,"EPSGrowth3Y%":7,"FCFGrowth3Y%":7,"ROIC%":10,"GrossMargin%":35,"OperatingMargin%":13,"DebtToEquity":0.80,"InterestCoverage":8,"EV/FCF":21,"EV/EBIT":18,"ForwardPE":21},
+    "Unknown": {"RevenueGrowth3Y%":8,"EPSGrowth3Y%":8,"FCFGrowth3Y%":8,"ROIC%":10,"GrossMargin%":45,"OperatingMargin%":15,"DebtToEquity":0.80,"InterestCoverage":8,"EV/FCF":22,"EV/EBIT":18,"ForwardPE":22},
+}
+
+SECTOR_PROXIES = {
+    "Technology": ["MSFT","AAPL","NVDA","AVGO","ADBE","CRM","ORCL","AMD","QCOM","INTC"],
+    "Communication Services": ["GOOGL","META","NFLX","DIS","TMUS"],
+    "Consumer Cyclical": ["AMZN","TSLA","HD","BKNG","MELI","NKE","SBUX"],
+    "Healthcare": ["UNH","LLY","JNJ","ABBV","MRK"],
+    "Financial Services": ["JPM","BAC","V","MA","BRK-B"],
+    "Energy": ["XOM","CVX","COP","SLB"],
+    "Industrials": ["GE","CAT","HON","RTX","LMT"],
+}
+
+def _f(x, default=np.nan):
     try:
-        yf_symbol = normalize_symbol_for_yfinance(clean_ticker(symbol))
-        return list(yf.Ticker(yf_symbol).options or [])
+        if x is None or pd.isna(x):
+            return default
+        return float(x)
     except Exception:
-        return []
+        return default
 
+def _latest_stmt(df, rows):
+    if df is None or df.empty:
+        return np.nan
+    for r in rows:
+        if r in df.index:
+            s = pd.to_numeric(df.loc[r], errors="coerce").dropna()
+            if not s.empty:
+                return float(s.iloc[0])
+    return np.nan
 
-@st.cache_data(ttl=900)
-def get_option_chain(symbol: str, expiry: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return calls, puts for a symbol/expiry from yfinance."""
+def _cagr_stmt(df, rows, years=3):
+    if df is None or df.empty:
+        return np.nan
+    for r in rows:
+        if r in df.index:
+            s = pd.to_numeric(df.loc[r], errors="coerce").dropna()
+            if len(s) >= 2:
+                latest = float(s.iloc[0])
+                idx = min(years, len(s)-1)
+                old = float(s.iloc[idx])
+                if latest > 0 and old > 0:
+                    return ((latest / old) ** (1 / max(idx, 1)) - 1) * 100
+    return np.nan
+
+@st.cache_data(ttl=3600)
+def get_financial_quality_metrics(symbol: str) -> dict:
+    symbol = clean_ticker(symbol)
+    yf_symbol = normalize_symbol_for_yfinance(symbol)
+    if not symbol or symbol in MANUAL_ONLY_TICKERS or symbol.endswith("80"):
+        return {}
+
     try:
-        yf_symbol = normalize_symbol_for_yfinance(clean_ticker(symbol))
-        chain = yf.Ticker(yf_symbol).option_chain(expiry)
-        calls = chain.calls.copy()
-        puts = chain.puts.copy()
-        calls["OptionType"] = "CALL"
-        puts["OptionType"] = "PUT"
-        calls["Expiry"] = expiry
-        puts["Expiry"] = expiry
-        return calls, puts
+        t = yf.Ticker(yf_symbol)
+        info = t.info or {}
+        fin = t.financials
+        bal = t.balance_sheet
+        cf = t.cashflow
+
+        revenue = _latest_stmt(fin, ["Total Revenue", "Operating Revenue"])
+        gross_profit = _latest_stmt(fin, ["Gross Profit"])
+        operating_income = _latest_stmt(fin, ["Operating Income", "Operating Income or Loss"])
+        ebit = _latest_stmt(fin, ["EBIT", "Operating Income"])
+        net_income = _latest_stmt(fin, ["Net Income", "Net Income Common Stockholders"])
+        interest = abs(_latest_stmt(fin, ["Interest Expense", "Interest Expense Non Operating"]))
+
+        total_debt = _latest_stmt(bal, ["Total Debt", "Long Term Debt And Capital Lease Obligation"])
+        equity = _latest_stmt(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest"])
+        invested_capital = _latest_stmt(bal, ["Invested Capital"])
+        if pd.isna(invested_capital) or invested_capital <= 0:
+            assets = _latest_stmt(bal, ["Total Assets"])
+            current_liab = _latest_stmt(bal, ["Current Liabilities", "Total Current Liabilities"])
+            cash = _latest_stmt(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"])
+            invested_capital = assets - current_liab - cash if pd.notna(assets) and pd.notna(current_liab) else np.nan
+
+        ocf = _latest_stmt(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"])
+        capex = abs(_latest_stmt(cf, ["Capital Expenditure", "Capital Expenditures"]))
+        fcf = ocf - capex if pd.notna(ocf) and pd.notna(capex) else np.nan
+
+        ev = _f(info.get("enterpriseValue"))
+        sector = info.get("sector") or "Unknown"
+
+        gross_margin = (gross_profit/revenue*100) if pd.notna(gross_profit) and pd.notna(revenue) and revenue else _f(info.get("grossMargins"))*100
+        op_margin = (operating_income/revenue*100) if pd.notna(operating_income) and pd.notna(revenue) and revenue else _f(info.get("operatingMargins"))*100
+        de = (total_debt/equity) if pd.notna(total_debt) and pd.notna(equity) and equity else _f(info.get("debtToEquity"))/100
+        roic = (net_income/invested_capital*100) if pd.notna(net_income) and pd.notna(invested_capital) and invested_capital > 0 else np.nan
+        interest_cov = (ebit/interest) if pd.notna(ebit) and pd.notna(interest) and interest > 0 else np.nan
+        ev_fcf = (ev/fcf) if pd.notna(ev) and pd.notna(fcf) and fcf > 0 else np.nan
+        ev_ebit = (ev/ebit) if pd.notna(ev) and pd.notna(ebit) and ebit > 0 else np.nan
+
+        return {
+            "Ticker": symbol,
+            "Sector": sector,
+            "Industry": info.get("industry") or "",
+            "RevenueGrowth3Y%": _cagr_stmt(fin, ["Total Revenue", "Operating Revenue"], 3),
+            "EPSGrowth3Y%": _f(info.get("earningsQuarterlyGrowth")) * 100 if pd.notna(_f(info.get("earningsQuarterlyGrowth"))) else np.nan,
+            "FCFGrowth3Y%": _cagr_stmt(cf, ["Free Cash Flow", "Operating Cash Flow", "Total Cash From Operating Activities"], 3),
+            "ROIC%": roic,
+            "GrossMargin%": gross_margin,
+            "OperatingMargin%": op_margin,
+            "DebtToEquity": de,
+            "InterestCoverage": interest_cov,
+            "EV/FCF": ev_fcf,
+            "EV/EBIT": ev_ebit,
+            "ForwardPE": _f(info.get("forwardPE")),
+            "MarketCap": _f(info.get("marketCap")),
+            "EnterpriseValue": ev,
+            "DataSource": "yfinance",
+        }
     except Exception:
-        return pd.DataFrame(), pd.DataFrame()
+        return {"Ticker": symbol, "Sector": "Unknown", "Industry": "", "DataSource": "yfinance error"}
 
+@st.cache_data(ttl=3600)
+def sector_average(sector: str) -> dict:
+    sector = sector or "Unknown"
+    proxies = SECTOR_PROXIES.get(sector, [])
+    rows = [get_financial_quality_metrics(x) for x in proxies]
+    rows = [r for r in rows if r]
+    fallback = SECTOR_FALLBACK.get(sector, SECTOR_FALLBACK["Unknown"]).copy()
 
-def parse_expiry_date(expiry: str):
-    try:
-        return pd.to_datetime(expiry).date()
-    except Exception:
-        return None
+    if not rows:
+        return fallback
 
+    df = pd.DataFrame(rows)
+    for m in list(HIGHER_IS_BETTER_METRICS) + list(LOWER_IS_BETTER_METRICS):
+        vals = pd.to_numeric(df.get(m, pd.Series(dtype=float)), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if not vals.empty:
+            fallback[m] = float(vals.median())
+    return fallback
 
-def pick_expiries_by_dte(expiries: list, min_dte: int = 30, max_dte: int = 75, limit: int = 5) -> list:
-    today_d = date.today()
+def _better(stock, sector, metric):
+    if pd.isna(stock) or pd.isna(sector):
+        return False
+    return stock < sector if metric in LOWER_IS_BETTER_METRICS else stock > sector
+
+def _metric_score(stock, sector, metric):
+    if pd.isna(stock):
+        return 0.0
+    if pd.isna(sector) or sector == 0:
+        return 5.0
+    ratio = sector/stock if metric in LOWER_IS_BETTER_METRICS and stock > 0 else stock/sector
+    if ratio >= 1.50:
+        return 10
+    if ratio >= 1.20:
+        return 8
+    if ratio >= 1.00:
+        return 6.5
+    if ratio >= 0.80:
+        return 4.5
+    return 2
+
+def _rating(score):
+    if pd.isna(score): return "N/A"
+    if score >= 85: return "AAA"
+    if score >= 75: return "AA"
+    if score >= 65: return "A"
+    if score >= 55: return "BBB"
+    if score >= 45: return "BB"
+    return "Speculative"
+
+def build_quality_dashboard(portfolio_calc: pd.DataFrame) -> pd.DataFrame:
+    inv = portfolio_calc[(~portfolio_calc["IsCash"]) & (~portfolio_calc["Ticker"].isin(MANUAL_ONLY_TICKERS)) & (~portfolio_calc["Ticker"].str.endswith("80"))]
+    symbols = inv["Ticker"].dropna().astype(str).apply(clean_ticker).drop_duplicates().tolist()
     rows = []
-    for e in expiries:
-        d = parse_expiry_date(e)
-        if d is None:
+    metrics = list(HIGHER_IS_BETTER_METRICS) + list(LOWER_IS_BETTER_METRICS)
+
+    for sym in symbols:
+        row = get_financial_quality_metrics(sym)
+        if not row:
             continue
-        dte = (d - today_d).days
-        if min_dte <= dte <= max_dte:
-            rows.append((e, dte))
-    rows = sorted(rows, key=lambda x: abs(x[1] - 49))
-    return [e for e, _ in rows[:limit]]
+        avg = sector_average(row.get("Sector", "Unknown"))
+        for m in metrics:
+            stock = row.get(m, np.nan)
+            sec = avg.get(m, np.nan)
+            row[f"{m}_SectorAvg"] = sec
+            row[f"{m}_BetterThanSector"] = _better(stock, sec, m)
+            row[f"{m}_Score"] = _metric_score(stock, sec, m)
 
+        score_sum = 0
+        weight_sum = 0
+        for m, w in QUALITY_WEIGHTS.items():
+            score_sum += row.get(f"{m}_Score", 0) * w
+            weight_sum += w
+        row["QualityScore"] = score_sum / weight_sum * 10 if weight_sum else np.nan
+        row["QualityRating"] = _rating(row["QualityScore"])
+        rows.append(row)
 
-def enrich_option_chain(df: pd.DataFrame, underlying_price: float, option_type: str, expiry: str) -> pd.DataFrame:
-    if df.empty:
+    return pd.DataFrame(rows).sort_values("QualityScore", ascending=False) if rows else pd.DataFrame()
+
+def _fmt_vs_sector(row, metric, pct_value=True):
+    val = row.get(metric, np.nan)
+    sec = row.get(f"{metric}_SectorAvg", np.nan)
+    if pd.isna(val):
+        return "N/A"
+    if pct_value:
+        return f"{val:,.2f}% / Sector {sec:,.2f}%" if pd.notna(sec) else f"{val:,.2f}% / Sector N/A"
+    return f"{val:,.2f} / Sector {sec:,.2f}" if pd.notna(sec) else f"{val:,.2f} / Sector N/A"
+
+def build_quality_display_df(qdf):
+    if qdf.empty:
         return pd.DataFrame()
-    out = df.copy()
-    for col in ["strike", "lastPrice", "bid", "ask", "change", "percentChange", "volume", "openInterest", "impliedVolatility"]:
-        if col not in out.columns:
-            out[col] = 0
-        out[col] = to_number(out[col])
-
-    out["UnderlyingPrice"] = float(underlying_price or 0)
-    out["OptionType"] = option_type
-    out["Expiry"] = expiry
-    expiry_date = parse_expiry_date(expiry)
-    out["DTE"] = (expiry_date - date.today()).days if expiry_date else 0
-    out["Mid"] = np.where((out["bid"] > 0) & (out["ask"] > 0), (out["bid"] + out["ask"]) / 2, out["lastPrice"])
-    out["Spread"] = out["ask"] - out["bid"]
-    out["SpreadPct"] = np.where(out["Mid"] > 0, out["Spread"] / out["Mid"] * 100, 0)
-    out["MoneynessPct"] = np.where(out["strike"] > 0, (underlying_price / out["strike"] - 1) * 100, 0)
-
-    # For CSP: premium received / required cash
-    out["NetAssignPrice"] = out["strike"] - out["Mid"]
-    out["RequiredCash"] = out["strike"] * 100
-    out["PremiumIncome"] = out["Mid"] * 100
-    out["PremiumReturnPct"] = np.where(out["RequiredCash"] > 0, out["PremiumIncome"] / out["RequiredCash"] * 100, 0)
-    out["AnnualizedReturnPct"] = np.where(out["DTE"] > 0, out["PremiumReturnPct"] * 365 / out["DTE"], 0)
-    out["DownsideBufferPct"] = np.where(underlying_price > 0, (underlying_price - out["NetAssignPrice"]) / underlying_price * 100, 0)
-
-    # For long call: break-even and leverage proxy
-    out["Breakeven"] = out["strike"] + out["Mid"]
-    out["BreakevenMovePct"] = np.where(underlying_price > 0, (out["Breakeven"] / underlying_price - 1) * 100, 0)
-    out["ContractCost"] = out["Mid"] * 100
-    out["LeverageNotional"] = np.where(out["ContractCost"] > 0, (underlying_price * 100) / out["ContractCost"], 0)
-
-    # yfinance usually does not provide delta. Use rough strike-distance buckets.
-    out["DeltaZone"] = np.where(
-        option_type == "PUT",
-        np.select(
-            [out["MoneynessPct"] > 15, out["MoneynessPct"] > 8, out["MoneynessPct"] > 3, out["MoneynessPct"] > -3],
-            ["Very OTM", "OTM", "Near OTM", "ATM"],
-            default="ITM"
-        ),
-        np.select(
-            [out["BreakevenMovePct"] < 3, out["BreakevenMovePct"] < 8, out["BreakevenMovePct"] < 15],
-            ["ATM/Near", "Moderate", "Far"],
-            default="Very Far"
-        ),
-    )
-
+    out = pd.DataFrame({
+        "Ticker": qdf["Ticker"],
+        "Sector": qdf["Sector"],
+        "Industry": qdf["Industry"],
+        "QualityScore": qdf["QualityScore"],
+        "Rating": qdf["QualityRating"],
+    })
+    for m in ["RevenueGrowth3Y%", "EPSGrowth3Y%", "FCFGrowth3Y%", "ROIC%", "GrossMargin%", "OperatingMargin%"]:
+        out[m] = qdf.apply(lambda r: _fmt_vs_sector(r, m, True), axis=1)
+    for m in ["DebtToEquity", "InterestCoverage", "EV/FCF", "EV/EBIT", "ForwardPE"]:
+        out[m] = qdf.apply(lambda r: _fmt_vs_sector(r, m, False), axis=1)
     return out
 
-
-def build_csp_candidates_from_yfinance(symbols: list, min_dte: int = 30, max_dte: int = 75, max_symbols: int = 20) -> pd.DataFrame:
-    rows = []
-    prices = get_current_prices(symbols[:max_symbols])
-    for symbol in symbols[:max_symbols]:
-        symbol = clean_ticker(symbol)
-        yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
-        underlying_price = float(prices.get(yf_symbol, prices.get(symbol, 0)) or 0)
-        if underlying_price <= 0:
-            continue
-        expiries = pick_expiries_by_dte(get_option_expirations(symbol), min_dte, max_dte, limit=3)
-        trend = analyze_trend_for_symbol(symbol) or {}
-        fv = fair_value_lite(symbol, underlying_price)
-        for expiry in expiries:
-            _, puts = get_option_chain(symbol, expiry)
-            puts = enrich_option_chain(puts, underlying_price, "PUT", expiry)
-            if puts.empty:
-                continue
-            # prefer OTM puts: net assign below current price, liquid-ish, positive premium
-            p = puts[(puts["Mid"] > 0) & (puts["strike"] < underlying_price) & (puts["openInterest"] >= 10)].copy()
-            if p.empty:
-                p = puts[(puts["Mid"] > 0) & (puts["strike"] < underlying_price)].copy()
-            if p.empty:
-                continue
-            p["Symbol"] = symbol
-            p["TrendScore"] = trend.get("TrendScore", np.nan)
-            p["RSI14"] = trend.get("RSI14", np.nan)
-            p["SignalToday"] = trend.get("SignalToday", "")
-            p["FairValue"] = fv.get("FairValue", np.nan)
-            p["MarginSafetyPct"] = fv.get("MarginSafety%", 0)
-            # Score: trend + annualized premium + buffer + liquidity, penalize wide spreads/too hot RSI
-            p["CSPScore"] = (
-                np.nan_to_num(p["TrendScore"], nan=5) * 0.35
-                + np.clip(p["AnnualizedReturnPct"], 0, 40) / 4 * 0.25
-                + np.clip(p["DownsideBufferPct"], 0, 25) / 2.5 * 0.20
-                + np.clip(np.log1p(p["openInterest"]), 0, 8) / 8 * 10 * 0.10
-                + np.clip(np.log1p(p["volume"]), 0, 8) / 8 * 10 * 0.10
-            )
-            p.loc[p["SpreadPct"] > 30, "CSPScore"] -= 1.5
-            p.loc[p["RSI14"] > 80, "CSPScore"] -= 1.0
-            p["CSPScore"] = p["CSPScore"].clip(0, 10)
-            rows.append(p)
-    if not rows:
-        return pd.DataFrame()
-    out = pd.concat(rows, ignore_index=True)
-    return out.sort_values(["CSPScore", "AnnualizedReturnPct", "DownsideBufferPct"], ascending=False)
-
-
-def build_long_call_candidates_from_yfinance(symbols: list, min_dte: int = 90, max_dte: int = 540, max_symbols: int = 20) -> pd.DataFrame:
-    rows = []
-    prices = get_current_prices(symbols[:max_symbols])
-    for symbol in symbols[:max_symbols]:
-        symbol = clean_ticker(symbol)
-        yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol))
-        underlying_price = float(prices.get(yf_symbol, prices.get(symbol, 0)) or 0)
-        if underlying_price <= 0:
-            continue
-        expiries = pick_expiries_by_dte(get_option_expirations(symbol), min_dte, max_dte, limit=4)
-        trend = analyze_trend_for_symbol(symbol) or {}
-        fv = fair_value_lite(symbol, underlying_price)
-        for expiry in expiries:
-            calls, _ = get_option_chain(symbol, expiry)
-            calls = enrich_option_chain(calls, underlying_price, "CALL", expiry)
-            if calls.empty:
-                continue
-            c = calls[(calls["Mid"] > 0) & (calls["strike"] >= underlying_price * 0.85) & (calls["strike"] <= underlying_price * 1.20)].copy()
-            if c.empty:
-                continue
-            c["Symbol"] = symbol
-            c["TrendScore"] = trend.get("TrendScore", np.nan)
-            c["RSI14"] = trend.get("RSI14", np.nan)
-            c["SignalToday"] = trend.get("SignalToday", "")
-            c["FairValue"] = fv.get("FairValue", np.nan)
-            c["MarginSafetyPct"] = fv.get("MarginSafety%", 0)
-            c["CallScore"] = (
-                np.nan_to_num(c["TrendScore"], nan=5) * 0.45
-                + np.clip(c["MarginSafetyPct"], -20, 60) / 60 * 10 * 0.20
-                + np.clip(20 - c["BreakevenMovePct"], 0, 20) / 20 * 10 * 0.20
-                + np.clip(np.log1p(c["openInterest"]), 0, 8) / 8 * 10 * 0.15
-            )
-            c.loc[c["SpreadPct"] > 30, "CallScore"] -= 1.5
-            c.loc[c["RSI14"] > 80, "CallScore"] -= 1.0
-            c["CallScore"] = c["CallScore"].clip(0, 10)
-            rows.append(c)
-    if not rows:
-        return pd.DataFrame()
-    out = pd.concat(rows, ignore_index=True)
-    return out.sort_values(["CallScore", "TrendScore", "BreakevenMovePct"], ascending=[False, False, True])
-
+def quality_table_style(display_df, raw_df):
+    if display_df.empty or raw_df.empty:
+        return display_df
+    lookup = raw_df.set_index("Ticker")
+    def style_row(row):
+        styles = []
+        ticker = row.get("Ticker")
+        for col in row.index:
+            if col in HIGHER_IS_BETTER_METRICS or col in LOWER_IS_BETTER_METRICS:
+                if ticker in lookup.index and not pd.isna(lookup.loc[ticker].get(col, np.nan)):
+                    good = bool(lookup.loc[ticker].get(f"{col}_BetterThanSector", False))
+                    styles.append("color: #16a34a; font-weight: 700;" if good else "color: #dc2626; font-weight: 700;")
+                else:
+                    styles.append("color: #94a3b8;")
+            elif col == "QualityScore":
+                score = row[col]
+                styles.append("color: #16a34a; font-weight: 800;" if pd.notna(score) and score >= 75 else "color: #ca8a04; font-weight: 800;" if pd.notna(score) and score >= 55 else "color: #dc2626; font-weight: 800;")
+            else:
+                styles.append("")
+        return styles
+    return display_df.style.apply(style_row, axis=1).format({"QualityScore": "{:.1f}"})
 
 # =====================================================
 # LOAD ALL DATA ONCE
@@ -1639,13 +1558,12 @@ st.sidebar.metric("Property Equity", format_thb(property_equity))
 # TABS
 # =====================================================
 
-tab_wealth, tab_portfolio, tab_news, tab_macro, tab_watchlist, tab_option_calc, tab_options, tab_market = st.tabs([
+tab_wealth, tab_portfolio, tab_news, tab_macro, tab_watchlist, tab_options, tab_market = st.tabs([
     "💰 My Wealth",
     "📈 Portfolio Dashboard",
     "📰 Portfolio News",
     "🌍 Macro Dashboard",
     "👀 Watchlist",
-    "🧮 Option Calculator",
     "🧨 Options War Room",
     "🔎 Market Analysis",
 ])
@@ -1741,6 +1659,83 @@ with tab_portfolio:
         ticker_summary = portfolio_calc.groupby("Ticker", dropna=False)["MarketValueTHB"].sum().reset_index()
         if ticker_summary["MarketValueTHB"].sum() != 0:
             st.plotly_chart(px.pie(ticker_summary, names="Ticker", values="MarketValueTHB", title="Allocation by Ticker"), use_container_width=True)
+
+    st.subheader("🏆 Quality / VI Dashboard")
+    st.caption("ดูคุณภาพธุรกิจแบบ VI / Quality Growth พร้อมเทียบ Sector Average: สีเขียว = ดีกว่า sector, สีแดง = แย่กว่า sector")
+
+    with st.spinner("กำลังดึงงบการเงินจาก yfinance และคำนวณ Quality Score..."):
+        quality_df = build_quality_dashboard(portfolio_calc)
+
+    if quality_df.empty:
+        st.info("ยังดึงข้อมูลงบการเงินไม่ได้ หรือมีเฉพาะ cash / manual asset")
+    else:
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Avg Quality Score", f"{quality_df['QualityScore'].mean():.1f}/100")
+        q2.metric("AAA / AA", int(quality_df["QualityRating"].isin(["AAA", "AA"]).sum()))
+        q3.metric("Median ROIC", pct(quality_df["ROIC%"].median()))
+        q4.metric("Median Gross Margin", pct(quality_df["GrossMargin%"].median()))
+
+        quality_display = build_quality_display_df(quality_df)
+        st.dataframe(
+            quality_table_style(quality_display, quality_df),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "QualityScore": st.column_config.ProgressColumn("Quality Score", min_value=0, max_value=100),
+            },
+        )
+
+        c_quality_1, c_quality_2 = st.columns(2)
+        with c_quality_1:
+            st.plotly_chart(
+                px.bar(
+                    quality_df,
+                    x="Ticker",
+                    y="QualityScore",
+                    color="QualityRating",
+                    title="Quality Score by Holding",
+                    hover_data=["Sector", "ROIC%", "GrossMargin%", "OperatingMargin%", "ForwardPE"],
+                ),
+                use_container_width=True,
+            )
+        with c_quality_2:
+            moat_df = quality_df[existing_columns(quality_df, ["Ticker", "ROIC%", "GrossMargin%", "OperatingMargin%"])].copy()
+            if not moat_df.empty:
+                moat_long = moat_df.melt(id_vars="Ticker", var_name="Metric", value_name="Value")
+                st.plotly_chart(
+                    px.bar(
+                        moat_long,
+                        x="Ticker",
+                        y="Value",
+                        color="Metric",
+                        barmode="group",
+                        title="Moat Metrics: ROIC / Gross Margin / Operating Margin",
+                    ),
+                    use_container_width=True,
+                )
+
+        st.subheader("🔎 Raw Metrics + Sector Average")
+        raw_cols = [
+            "Ticker", "Sector", "Industry",
+            "RevenueGrowth3Y%", "RevenueGrowth3Y%_SectorAvg",
+            "EPSGrowth3Y%", "EPSGrowth3Y%_SectorAvg",
+            "FCFGrowth3Y%", "FCFGrowth3Y%_SectorAvg",
+            "ROIC%", "ROIC%_SectorAvg",
+            "GrossMargin%", "GrossMargin%_SectorAvg",
+            "OperatingMargin%", "OperatingMargin%_SectorAvg",
+            "DebtToEquity", "DebtToEquity_SectorAvg",
+            "InterestCoverage", "InterestCoverage_SectorAvg",
+            "EV/FCF", "EV/FCF_SectorAvg",
+            "EV/EBIT", "EV/EBIT_SectorAvg",
+            "ForwardPE", "ForwardPE_SectorAvg",
+            "DataSource"
+        ]
+        st.dataframe(quality_df[existing_columns(quality_df, raw_cols)].round(2), use_container_width=True, hide_index=True)
+
+        st.info(
+            "หมายเหตุ: เวอร์ชันนี้ใช้ yfinance เป็นหลัก บางตัวอาจไม่มี ROIC, EV/FCF, FCF Growth ครบ จึงแสดง N/A ได้ "
+            "Sector Average ใช้ proxy median + fallback เพื่อให้ใช้งานได้ฟรีก่อน หากต้องการแม่นระดับมืออาชีพควรต่อ FinancialModelingPrep / Alpha Vantage / Finnhub ภายหลัง"
+        )
 
     st.subheader("Portfolio Level Risk")
     risk_period = st.selectbox("ช่วงเวลาคำนวณความเสี่ยง", ["6mo", "1y", "3y", "5y"], index=1, key="portfolio_risk_period")
@@ -2006,8 +2001,6 @@ with tab_watchlist:
 
     with st.spinner("กำลังสแกน trend / fair value / momentum จาก yfinance..."):
         candidates = build_option_candidate_screener(universe, max_symbols=max_symbols)
-        candidates = apply_manual_target_prices(candidates, watchlist)
-        candidates = ensure_candidate_display_columns(candidates)
 
     if candidates.empty:
         st.warning("ยังไม่มีข้อมูลพอสำหรับสร้าง Auto Watchlist")
@@ -2030,13 +2023,13 @@ with tab_watchlist:
             st.subheader("🔥 High Conviction List")
             high_cols = [
                 "Symbol", "TotalScore", "Conviction", "SuggestedSetup",
-                "Price", "FairValueDisplay", "MarginSafety%",
+                "Price", "FairValue", "MarginSafety%",
                 "TrendScore", "ShortTrend", "MediumTrend", "LongTrend",
                 "RSI14", "Momentum1M%", "Momentum3M%", "Momentum6M%", "Momentum12M%",
                 "SignalToday"
             ]
             st.dataframe(
-                candidates[existing_columns(candidates, high_cols)].round(2),
+                candidates[high_cols].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2053,7 +2046,7 @@ with tab_watchlist:
             st.subheader("📈 Multi-Timeframe Trend")
             trend_cols = ["Symbol", "ShortTrend", "MediumTrend", "LongTrend", "TrendScore", "MACD", "MACDSignal", "MACDHist", "RSI14", "PctFromHigh252%"]
             st.dataframe(
-                candidates[existing_columns(candidates, trend_cols)].round(3),
+                candidates[trend_cols].round(3),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2066,16 +2059,13 @@ with tab_watchlist:
             )
 
             st.subheader("💰 Fair Value Lite")
-            fv_cols = ["Symbol", "Name", "Theme", "Price", "FairValueDisplay", "AnalystTargetDisplay", "MarginSafety%", "ForwardPEDisplay", "FairValueSource", "FairValueScore", "Thesis"]
+            fv_cols = ["Symbol", "Price", "FairValue", "AnalystTarget", "MarginSafety%", "ForwardPE", "FairValueSource", "FairValueScore"]
             st.dataframe(
-                candidates[existing_columns(candidates, fv_cols)].round(2),
+                candidates[fv_cols].round(2),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "MarginSafety%": st.column_config.NumberColumn("Margin of Safety", format="%.2f%%"),
-                    "FairValueDisplay": st.column_config.TextColumn("Fair Value"),
-                    "AnalystTargetDisplay": st.column_config.TextColumn("Analyst / Manual Target"),
-                    "ForwardPEDisplay": st.column_config.TextColumn("Forward PE"),
                     "FairValueScore": st.column_config.ProgressColumn("FV Score", min_value=0, max_value=10),
                 },
             )
@@ -2085,7 +2075,7 @@ with tab_watchlist:
                 st.info("วันนี้ยังไม่มี MACD Bullish Cross ในกลุ่มที่สแกน")
             else:
                 st.dataframe(
-                    signal_today[existing_columns(signal_today, ["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"])].round(2),
+                    signal_today[["Symbol", "SignalToday", "TotalScore", "SuggestedSetup", "Price", "MarginSafety%"]].round(2),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -2102,191 +2092,14 @@ with tab_watchlist:
                 use_container_width=True,
             )
             score_cols = ["Symbol", "TotalScore", "TrendScore", "FairValueScore", "MomentumScore", "RiskScore", "SuggestedSetup"]
-            st.dataframe(candidates[existing_columns(candidates, score_cols)].round(2), use_container_width=True, hide_index=True)
+            st.dataframe(candidates[score_cols].round(2), use_container_width=True, hide_index=True)
 
             st.info("Auto Watchlist นี้ยังเป็น v1 จาก yfinance เท่านั้น ต่อไปค่อยเพิ่ม TradingView technical rating และ options chain API")
 
 
 
-
 # =====================================================
-# TAB 6: OPTION CALCULATOR
-# =====================================================
-
-with tab_option_calc:
-    st.header("🧮 Option Calculator: Cash Secured Put + Long Call")
-    st.caption("คำนวณจากกราฟ/เทรนด์ของหุ้นในพอร์ต + Auto Watchlist + Watchlist และดึง option chain จาก yfinance เบื้องต้น")
-
-    st.info(
-        "แนวคิดหลัก: ใช้ Watchlist/Portfolio เป็น universe → ตรวจกราฟด้วย Multi-timeframe trend, MACD, RSI → "
-        "เลือกสัญญา PUT สำหรับ Cash Secured Put หรือ CALL สำหรับ Long Call. ข้อมูล option chain จาก yfinance อาจไม่ realtime เท่า broker/API เฉพาะทาง"
-    )
-
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    calc_mode = c1.selectbox("โหมดคำนวณ", ["Cash Secured Put เพื่อรับหุ้น", "Long Call เพื่อ leverage ขาขึ้น", "ดูรายตัว"], index=0)
-    min_dte_calc = c2.number_input("DTE ขั้นต่ำ", min_value=1, max_value=730, value=30 if calc_mode.startswith("Cash") else 90, step=1)
-    max_dte_calc = c3.number_input("DTE สูงสุด", min_value=1, max_value=1000, value=75 if calc_mode.startswith("Cash") else 540, step=1)
-    max_scan_calc = c4.slider("จำนวนหุ้นที่สแกน", 5, 60, 20, step=5)
-
-    extra_calc = st.text_input("เพิ่ม ticker เอง คั่นด้วย comma", value="", placeholder="เช่น MU,NVDA,AVGO,RKLB")
-    extra_calc_symbols = [clean_ticker(x) for x in extra_calc.split(",") if clean_ticker(x)]
-
-    universe_calc = get_candidate_universe(portfolio_calc, watchlist, DEFAULT_SCAN_UNIVERSE + extra_calc_symbols)
-    st.caption(f"Universe จาก Portfolio + Watchlist + Default Scan = {len(universe_calc)} ตัว")
-
-    if calc_mode == "Cash Secured Put เพื่อรับหุ้น":
-        st.subheader("🛡️ Cash Secured Put Scanner")
-        st.caption("เหมาะกับหุ้นที่อยากรับเพิ่มอยู่แล้ว เลือก strike ที่รับหุ้นได้จริง และดู premium return ต่อเงินสดที่ต้องสำรอง")
-
-        with st.spinner("กำลังดึง option chain และคำนวณ CSP..."):
-            csp_df = build_csp_candidates_from_yfinance(universe_calc, min_dte=int(min_dte_calc), max_dte=int(max_dte_calc), max_symbols=max_scan_calc)
-
-        if csp_df.empty:
-            st.warning("ยังดึง option chain ไม่ได้ หรือไม่มี PUT ที่เข้าเกณฑ์")
-        else:
-            f1, f2, f3, f4 = st.columns(4)
-            min_score_csp = f1.slider("CSP Score ขั้นต่ำ", 0.0, 10.0, 6.0, step=0.5)
-            min_ann_ret = f2.slider("Annualized Return ขั้นต่ำ %", 0.0, 100.0, 8.0, step=1.0)
-            min_buffer = f3.slider("Downside Buffer ขั้นต่ำ %", 0.0, 50.0, 5.0, step=1.0)
-            max_spread = f4.slider("Spread สูงสุด %", 0.0, 100.0, 35.0, step=5.0)
-
-            show = csp_df[
-                (csp_df["CSPScore"] >= min_score_csp)
-                & (csp_df["AnnualizedReturnPct"] >= min_ann_ret)
-                & (csp_df["DownsideBufferPct"] >= min_buffer)
-                & (csp_df["SpreadPct"] <= max_spread)
-            ].copy()
-
-            st.metric("จำนวนสัญญาที่ผ่านเกณฑ์", len(show))
-            cols = [
-                "Symbol", "Expiry", "DTE", "strike", "UnderlyingPrice", "Mid", "bid", "ask",
-                "NetAssignPrice", "RequiredCash", "PremiumIncome", "PremiumReturnPct", "AnnualizedReturnPct",
-                "DownsideBufferPct", "MoneynessPct", "openInterest", "volume", "SpreadPct",
-                "TrendScore", "RSI14", "MarginSafetyPct", "CSPScore", "SignalToday"
-            ]
-            st.dataframe(
-                show[cols].round(3).head(120),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "CSPScore": st.column_config.ProgressColumn("CSP Score", min_value=0, max_value=10),
-                    "Mid": st.column_config.NumberColumn("Premium/Mid", format="$%.2f"),
-                    "bid": st.column_config.NumberColumn("Bid", format="$%.2f"),
-                    "ask": st.column_config.NumberColumn("Ask", format="$%.2f"),
-                    "NetAssignPrice": st.column_config.NumberColumn("Net Assign", format="$%.2f"),
-                    "RequiredCash": st.column_config.NumberColumn("Cash Required", format="$%.0f"),
-                    "PremiumIncome": st.column_config.NumberColumn("Premium", format="$%.0f"),
-                    "PremiumReturnPct": st.column_config.NumberColumn("Return", format="%.2f%%"),
-                    "AnnualizedReturnPct": st.column_config.NumberColumn("Annualized", format="%.2f%%"),
-                    "DownsideBufferPct": st.column_config.NumberColumn("Buffer", format="%.2f%%"),
-                    "SpreadPct": st.column_config.NumberColumn("Spread", format="%.2f%%"),
-                }
-            )
-
-            if not show.empty:
-                top = show.head(20)
-                st.plotly_chart(
-                    px.bar(top, x="Symbol", y="CSPScore", color="AnnualizedReturnPct", hover_data=["Expiry", "strike", "Mid", "DownsideBufferPct"], title="Top CSP candidates"),
-                    use_container_width=True,
-                )
-
-    elif calc_mode == "Long Call เพื่อ leverage ขาขึ้น":
-        st.subheader("🚀 Long Call Scanner")
-        st.caption("เหมาะกับหุ้นที่กราฟขาขึ้นชัด แต่ต้องระวัง premium, break-even และ time decay")
-
-        with st.spinner("กำลังดึง option chain และคำนวณ Long Call... "):
-            call_df = build_long_call_candidates_from_yfinance(universe_calc, min_dte=int(min_dte_calc), max_dte=int(max_dte_calc), max_symbols=max_scan_calc)
-
-        if call_df.empty:
-            st.warning("ยังดึง option chain ไม่ได้ หรือไม่มี CALL ที่เข้าเกณฑ์")
-        else:
-            f1, f2, f3 = st.columns(3)
-            min_score_call = f1.slider("Call Score ขั้นต่ำ", 0.0, 10.0, 6.0, step=0.5)
-            max_be = f2.slider("Break-even move สูงสุด %", 0.0, 80.0, 25.0, step=1.0)
-            max_spread_call = f3.slider("Spread สูงสุด %", 0.0, 100.0, 35.0, step=5.0)
-
-            show = call_df[
-                (call_df["CallScore"] >= min_score_call)
-                & (call_df["BreakevenMovePct"] <= max_be)
-                & (call_df["SpreadPct"] <= max_spread_call)
-            ].copy()
-
-            st.metric("จำนวนสัญญาที่ผ่านเกณฑ์", len(show))
-            cols = [
-                "Symbol", "Expiry", "DTE", "strike", "UnderlyingPrice", "Mid", "bid", "ask",
-                "Breakeven", "BreakevenMovePct", "ContractCost", "LeverageNotional",
-                "openInterest", "volume", "SpreadPct", "TrendScore", "RSI14", "MarginSafetyPct", "CallScore", "SignalToday"
-            ]
-            st.dataframe(
-                show[cols].round(3).head(120),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "CallScore": st.column_config.ProgressColumn("Call Score", min_value=0, max_value=10),
-                    "Mid": st.column_config.NumberColumn("Premium/Mid", format="$%.2f"),
-                    "Breakeven": st.column_config.NumberColumn("Break-even", format="$%.2f"),
-                    "BreakevenMovePct": st.column_config.NumberColumn("BE Move", format="%.2f%%"),
-                    "ContractCost": st.column_config.NumberColumn("Cost/contract", format="$%.0f"),
-                    "LeverageNotional": st.column_config.NumberColumn("Notional leverage", format="%.1fx"),
-                    "SpreadPct": st.column_config.NumberColumn("Spread", format="%.2f%%"),
-                }
-            )
-
-    else:
-        st.subheader("🔍 ดูหุ้นและ Option Chain รายตัว")
-        symbol_single = st.selectbox("เลือกหุ้น", universe_calc, index=0 if universe_calc else None)
-        if symbol_single:
-            prices = get_current_prices([symbol_single])
-            yf_symbol = clean_ticker(normalize_symbol_for_yfinance(symbol_single))
-            spot = float(prices.get(yf_symbol, prices.get(symbol_single, 0)) or 0)
-            st.metric("Underlying Price", f"${spot:,.2f}" if spot else "N/A")
-
-            trend = analyze_trend_for_symbol(symbol_single) or {}
-            t1, t2, t3, t4 = st.columns(4)
-            t1.metric("Trend Score", f"{trend.get('TrendScore', 0):.2f}/10")
-            t2.metric("RSI14", f"{trend.get('RSI14', 0):.2f}")
-            t3.metric("MACD Hist", f"{trend.get('MACDHist', 0):.3f}")
-            t4.metric("Signal", str(trend.get("SignalToday", "-")) or "-")
-
-            hist = download_prices([symbol_single], period="1y")
-            if not hist.empty:
-                s = hist.iloc[:, 0].dropna()
-                tech = add_technical_indicators(s)
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=tech.index, y=tech["Close"], name="Close", mode="lines"))
-                fig.add_trace(go.Scatter(x=tech.index, y=tech["EMA20"], name="EMA20", mode="lines"))
-                fig.add_trace(go.Scatter(x=tech.index, y=tech["EMA50"], name="EMA50", mode="lines"))
-                fig.add_trace(go.Scatter(x=tech.index, y=tech["EMA200"], name="EMA200", mode="lines"))
-                fig.update_layout(template="plotly_dark", height=520, hovermode="x unified")
-                st.plotly_chart(fig, use_container_width=True)
-
-            expiries = get_option_expirations(symbol_single)
-            if expiries:
-                expiry_single = st.selectbox("เลือกวันหมดอายุ", expiries, index=min(1, len(expiries)-1))
-                calls, puts = get_option_chain(symbol_single, expiry_single)
-                calls = enrich_option_chain(calls, spot, "CALL", expiry_single)
-                puts = enrich_option_chain(puts, spot, "PUT", expiry_single)
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("### CALL")
-                    st.dataframe(calls[["strike", "bid", "ask", "Mid", "Breakeven", "BreakevenMovePct", "openInterest", "volume", "impliedVolatility", "SpreadPct"]].round(3), use_container_width=True, hide_index=True)
-                with c2:
-                    st.markdown("### PUT")
-                    st.dataframe(puts[["strike", "bid", "ask", "Mid", "NetAssignPrice", "PremiumReturnPct", "AnnualizedReturnPct", "DownsideBufferPct", "openInterest", "volume", "impliedVolatility", "SpreadPct"]].round(3), use_container_width=True, hide_index=True)
-            else:
-                st.info("yfinance ไม่พบ option chain สำหรับหุ้นนี้")
-
-    st.divider()
-    st.markdown("""
-    **เกณฑ์อ่านค่าเร็ว**  
-    - CSP ที่น่าสนใจ: หุ้นอยากรับจริง, TrendScore ดี, DTE ประมาณ 30–75 วัน, premium annualized พอคุ้ม, spread ไม่กว้าง, downside buffer มีระยะพอ  
-    - Long Call ที่น่าสนใจ: trend แข็ง, DTE ยาวพอให้ thesis ทำงาน, break-even move ไม่สูงเกินไป, spread ไม่กว้าง  
-    - ตารางนี้เป็นเครื่องกรอง ไม่ใช่คำสั่งซื้อขาย ต้องเช็กใน broker อีกครั้งก่อนส่งคำสั่ง
-    """)
-
-
-# =====================================================
-# TAB 7: OPTIONS WAR ROOM
+# TAB 6: OPTIONS WAR ROOM
 # =====================================================
 
 with tab_options:
