@@ -181,88 +181,61 @@ def render_sticky_ticker_table(df: pd.DataFrame, height: int = 520):
     view = view.replace([np.inf, -np.inf], np.nan)
     view = view.round(2)
 
-    html = view.to_html(index=False, escape=False, classes="sticky-ticker-table")
+    html_table = view.to_html(index=False, escape=False, classes="sticky-ticker-table", border=0)
 
-    st.markdown(f"""
-    <style>
-    .sticky-table-wrap {{
-        max-height: {height}px;
-        overflow: auto;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        border-radius: 12px;
-        background: white;
-    }}
-    table.sticky-ticker-table {{
-        border-collapse: collapse;
-        width: max-content;
-        min-width: 100%;
-        font-size: 14px;
-    }}
-    table.sticky-ticker-table th,
-    table.sticky-ticker-table td {{
-        border: 1px solid #e5e7eb;
-        padding: 9px 12px;
-        white-space: nowrap;
-        text-align: right;
-        background: white;
-        color: #111827;
-    }}
-    table.sticky-ticker-table th {{
-        position: sticky;
-        top: 0;
-        z-index: 3;
-        background: #f8fafc;
-        color: #6b7280;
-        font-weight: 700;
-    }}
-    table.sticky-ticker-table th:first-child,
-    table.sticky-ticker-table td:first-child {{
-        position: sticky;
-        left: 0;
-        z-index: 4;
-        background: #f8fafc;
-        color: #111827;
-        font-weight: 800;
-        text-align: left;
-        box-shadow: 3px 0 6px rgba(0,0,0,0.08);
-    }}
-    table.sticky-ticker-table th:first-child {{
-        z-index: 5;
-        background: #eef2ff;
-    }}
-    </style>
-    <div class="sticky-table-wrap">
-        {html}
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# =====================================================
-# GOOGLE SHEET LOADERS
-# =====================================================
-
-@st.cache_data(ttl=60)
-def read_google_sheet_tab(sheet_name):
-    encoded_sheet = quote(sheet_name)
-    url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet}"
-    return pd.read_csv(url)
-
-
-def safe_read_tab(tab_key, fallback):
-    sheet_name = SHEET_TABS.get(tab_key)
-    if not sheet_name:
-        st.sidebar.warning(f"ยังไม่ได้ตั้งชื่อแท็บสำหรับ {tab_key}")
-        return fallback.copy()
-    try:
-        df = read_google_sheet_tab(sheet_name)
-        if df.empty:
-            st.sidebar.warning(f"แท็บ {sheet_name} ว่าง")
-            return fallback.copy()
-        st.sidebar.success(f"โหลด Google Sheet แท็บ '{sheet_name}' ได้")
-        return normalize_columns(df)
-    except Exception as e:
-        st.sidebar.warning(f"โหลดแท็บ '{sheet_name}' ไม่ได้: {e}")
-        return fallback.copy()
+    html = f"""
+<style>
+.sticky-table-wrap {{
+    max-height: {height}px;
+    overflow: auto;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 12px;
+    background: white;
+}}
+table.sticky-ticker-table {{
+    border-collapse: collapse;
+    width: max-content;
+    min-width: 100%;
+    font-size: 14px;
+}}
+table.sticky-ticker-table th,
+table.sticky-ticker-table td {{
+    border: 1px solid #e5e7eb;
+    padding: 9px 12px;
+    white-space: nowrap;
+    text-align: right;
+    background: white;
+    color: #111827;
+}}
+table.sticky-ticker-table th {{
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f8fafc;
+    color: #6b7280;
+    font-weight: 700;
+}}
+table.sticky-ticker-table th:first-child,
+table.sticky-ticker-table td:first-child {{
+    position: sticky;
+    left: 0;
+    z-index: 4;
+    background: #f8fafc;
+    color: #111827;
+    font-weight: 800;
+    text-align: left;
+    box-shadow: 3px 0 6px rgba(0,0,0,0.08);
+}}
+table.sticky-ticker-table th:first-child {{
+    z-index: 5;
+    background: #eef2ff;
+}}
+</style>
+<div class="sticky-table-wrap">
+{html_table}
+</div>
+"""
+    st.components.v1.html(html, height=height + 80, scrolling=True)
 
 
 # =====================================================
